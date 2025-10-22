@@ -1,0 +1,19 @@
+[features]
+seeds = false
+skip-lint = false
+
+[programs.devnet]
+tossr_engine = "5xmSvdzDsFY4bx5nyFiMpmq881Epcm7v3Dxsxw54gGcX"
+
+[registry]
+url = "https://anchor.projectserum.com"
+
+[provider]
+cluster = "Devnet"
+wallet = "~/.config/solana/tossr-admin.json"
+
+[scripts]
+test = "anchor test"
+
+[toolchain]
+anchor_version = "0.31.1"

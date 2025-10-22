@@ -1,0 +1,191 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String   @id @default(cuid())
+  walletAddress String   @unique
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  bets          Bet[]
+  streaks       Streak[]
+  communitySeeds CommunitySeed[]
+  leaderboardEntries LeaderboardEntry[]
+
+  @@map("users")
+}
+
+model Market {
+  id          String @id @default(cuid())
+  name        String @unique
+  type        MarketType
+  isActive    Boolean @default(true)
+  description String?
+  config      Json
+  rounds Round[]
+  bets   Bet[]
+
+  @@map("markets")
+}
+
+enum MarketType {
+  PICK_RANGE
+  EVEN_ODD
+  LAST_DIGIT
+  MODULO_THREE
+  PATTERN_OF_DAY
+  SHAPE_COLOR
+  JACKPOT
+  ENTROPY_BATTLE
+  STREAK_METER
+  COMMUNITY_SEED
+}
+
+model Round {
+  id          String     @id @default(cuid())
+  marketId    String
+  roundNumber Int
+  status      RoundStatus
+  openedAt    DateTime   @default(now())
+  lockedAt    DateTime?
+  revealedAt  DateTime?
+  settledAt   DateTime?
+  outcome     Json?
+  entropy     Json?
+  attestation Json?
+
+  solanaAddress       String?
+  openTxHash          String?
+  lockTxHash          String?
+  revealTxHash        String?
+  commitTxHash        String?
+  commitStateTxHash   String?
+  delegateTxHash      String?
+  undelegateTxHash    String?
+
+  market       Market     @relation(fields: [marketId], references: [id])
+  bets         Bet[]
+  communitySeeds CommunitySeed[]
+  attestations Attestation[]
+
+  @@unique([marketId, roundNumber])
+  @@map("rounds")
+}
+
+enum RoundStatus {
+  PREDICTING
+  LOCKED
+  REVEALED
+  SETTLED
+  FAILED
+}
+
+model Bet {
+  id         String    @id @default(cuid())
+  userId     String
+  roundId    String
+  marketId   String
+  selection  Json
+  stake      BigInt
+  odds       Float
+  status     BetStatus @default(PENDING)
+  payout     BigInt?
+  createdAt  DateTime  @default(now())
+
+  user  User  @relation(fields: [userId], references: [id])
+  round Round @relation(fields: [roundId], references: [id])
+  market Market @relation(fields: [marketId], references: [id])
+
+  @@map("bets")
+}
+
+enum BetStatus {
+  PENDING
+  WON
+  LOST
+  REFUNDED
+}
+
+model Streak {
+  id          String    @id @default(cuid())
+  userId      String
+  marketId    String?
+  currentStreak Int     @default(0)
+  target      Int
+  status      StreakStatus @default(ACTIVE)
+  startedAt   DateTime  @default(now())
+  completedAt DateTime?
+  lastRoundId String?
+
+  user User  @relation(fields: [userId], references: [id])
+
+  @@unique([userId, marketId, status])
+  @@map("streaks")
+}
+
+enum StreakStatus {
+  ACTIVE
+  COMPLETED
+  FAILED
+}
+
+model CommunitySeed {
+  id       String @id @default(cuid())
+  userId   String
+  roundId  String
+  byte     Int
+  distance Int?
+  won      Boolean @default(false)
+  createdAt DateTime @default(now())
+
+  user  User  @relation(fields: [userId], references: [id])
+  round Round @relation(fields: [roundId], references: [id])
+
+  @@unique([userId, roundId])
+  @@map("community_seeds")
+}
+
+model Attestation {
+  id        String   @id @default(cuid())
+  hash      String   @unique
+  roundId   String?
+  round     Round?   @relation(fields: [roundId], references: [id])
+  type      String
+  payload   Json
+  signature String?
+  verified  Boolean  @default(false)
+  txHash    String?
+  createdAt DateTime @default(now())
+
+  @@map("attestations")
+}
+
+model LeaderboardEntry {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  totalBets Int      @default(0)
+  totalWon  Int      @default(0)
+  totalStake BigInt  @default(0)
+  totalPayout BigInt @default(0)
+  winRate   Float    @default(0)
+  streak    Int      @default(0)
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId])
+  @@map("leaderboard")
+}
+
+model SystemConfig {
+  id    String @id @default(cuid())
+  key   String @unique
+  value Json
+  updatedAt DateTime @updatedAt
+
+  @@map("system_config")
+}
