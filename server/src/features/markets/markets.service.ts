@@ -137,7 +137,12 @@ export class MarketsService {
       throw new AuthenticationError('Admin only');
     }
 
-    const markets = await db.market.findMany({ where: { type } });
+    const isValidType = (Object.values(MarketType) as string[]).includes(type);
+    if (!isValidType) {
+      throw new ValidationError('Invalid market type');
+    }
+    const prismaType = mapServerToPrismaMarketType(type as MarketType);
+    const markets = await db.market.findMany({ where: { type: prismaType } });
     if (!markets.length) return { updated: 0, signatures: [] as string[] };
 
     const signatures: string[] = [];

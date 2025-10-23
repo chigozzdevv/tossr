@@ -42,20 +42,32 @@ function fromProbability(num: number, den: number, ef: number) {
 
 function buildMarketsData(markets: ServerMarket[]): MarketData[] {
   // map server types to our tabs
-  const byType = new Map<string, ServerMarket>();
-  for (const m of markets) byType.set(m.type, m);
+  const byType = new Map<string, ServerMarket[]>();
+  for (const m of markets) {
+    const arr = byType.get(m.type) || [];
+    arr.push(m);
+    byType.set(m.type, arr);
+  }
 
-  const ef = (t: string) => edgeFactorFromBps(byType.get(t)?.config?.houseEdgeBps);
+  const anyOfType = (t: string) => (byType.get(t) || [])[0];
+  const ef = (bps?: number) => edgeFactorFromBps(bps);
 
-  const rangeEf = ef('PICK_RANGE');
-  const parityEf = ef('EVEN_ODD');
-  const lastDigitEf = ef('LAST_DIGIT');
-  const moduloEf = ef('MODULO_THREE');
-  const jackpotEf = ef('JACKPOT');
-  const entropyEf = ef('ENTROPY_BATTLE');
-  const patternEf = ef('PATTERN_OF_DAY');
-  const shapeEf = ef('SHAPE_COLOR');
-  const communityEf = ef('COMMUNITY_SEED');
+  const rangeMarkets = byType.get('PICK_RANGE') || [];
+  const r2 = rangeMarkets.find(m => m.config?.partitionCount === 2);
+  const r4 = rangeMarkets.find(m => m.config?.partitionCount === 4);
+  const r10 = rangeMarkets.find(m => m.config?.partitionCount === 10);
+  const rangeEf2 = ef(r2?.config?.houseEdgeBps);
+  const rangeEf4 = ef(r4?.config?.houseEdgeBps);
+  const rangeEf10 = ef(r10?.config?.houseEdgeBps);
+  const rangeEfAny = rangeEf10 || rangeEf4 || rangeEf2 || ef(undefined);
+  const parityEf = ef(anyOfType('EVEN_ODD')?.config?.houseEdgeBps);
+  const lastDigitEf = ef(anyOfType('LAST_DIGIT')?.config?.houseEdgeBps);
+  const moduloEf = ef(anyOfType('MODULO_THREE')?.config?.houseEdgeBps);
+  const jackpotEf = ef(anyOfType('JACKPOT')?.config?.houseEdgeBps);
+  const entropyEf = ef(anyOfType('ENTROPY_BATTLE')?.config?.houseEdgeBps);
+  const patternEf = ef(anyOfType('PATTERN_OF_DAY')?.config?.houseEdgeBps);
+  const shapeEf = ef(anyOfType('SHAPE_COLOR')?.config?.houseEdgeBps);
+  const communityEf = ef(anyOfType('COMMUNITY_SEED')?.config?.houseEdgeBps);
 
   const patternCounts = [168, 10, 29, 52, 73, 437, 231]; // prime, fib, square, ends7, pal, even, odd
 
@@ -65,11 +77,11 @@ function buildMarketsData(markets: ServerMarket[]): MarketData[] {
       name: 'Pick the Range',
       description: 'Choose your range width — tighter range, higher payout',
       options: [
-        { id: 'r1', label: '1-50', description: '50 numbers', odds: fromEqualBins(2, rangeEf), coverage: '50/100', trend: 'hot', trendValue: '+12%', popularity: 78 },
-        { id: 'r2', label: '1-25', description: '25 numbers', odds: fromEqualBins(4, rangeEf), coverage: '25/100', trend: 'neutral', trendValue: '+2%', popularity: 45 },
-        { id: 'r3', label: '1-10', description: '10 numbers', odds: fromEqualBins(10, rangeEf), coverage: '10/100', trend: 'cold', trendValue: '-8%', popularity: 23 },
-        { id: 'r4', label: '1-5', description: '5 numbers', odds: fromProbability(5, 100, rangeEf), coverage: '5/100', trend: 'hot', trendValue: '+18%', popularity: 52 },
-        { id: 'r5', label: 'Single', description: 'Exact number', odds: fromEqualBins(100, rangeEf), coverage: '1/100', trend: 'hot', trendValue: '+24%', popularity: 34 },
+        { id: 'r1', label: '1-50', description: '50 numbers', odds: fromEqualBins(2, rangeEf2), coverage: '50/100', trend: 'hot', trendValue: '+12%', popularity: 78 },
+        { id: 'r2', label: '1-25', description: '25 numbers', odds: fromEqualBins(4, rangeEf4), coverage: '25/100', trend: 'neutral', trendValue: '+2%', popularity: 45 },
+        { id: 'r3', label: '1-10', description: '10 numbers', odds: fromEqualBins(10, rangeEf10), coverage: '10/100', trend: 'cold', trendValue: '-8%', popularity: 23 },
+        { id: 'r4', label: '1-5', description: '5 numbers', odds: fromProbability(5, 100, rangeEfAny), coverage: '5/100', trend: 'hot', trendValue: '+18%', popularity: 52 },
+        { id: 'r5', label: 'Single', description: 'Exact number', odds: fromEqualBins(100, rangeEfAny), coverage: '1/100', trend: 'hot', trendValue: '+24%', popularity: 34 },
       ],
     },
     {

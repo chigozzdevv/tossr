@@ -47,6 +47,7 @@ pub mod tossr_engine {
         name: String,
         house_edge_bps: u16,
         market_type: MarketType,
+        market_index: u16,
     ) -> Result<()> {
         let market = &mut ctx.accounts.market;
         market.admin = ctx.accounts.admin.key();
@@ -56,6 +57,7 @@ pub mod tossr_engine {
         market.house_edge_bps = house_edge_bps;
         market.mint = ctx.accounts.mint.key();
         market.market_type = market_type;
+        market.index = market_index;
         Ok(())
     }
 
@@ -917,6 +919,7 @@ pub struct Market {
     pub house_edge_bps: u16,
     pub mint: Pubkey,
     pub market_type: MarketType,
+    pub index: u16,
 }
 
 #[account]
@@ -990,14 +993,15 @@ pub struct PermissionGroup {
 }
 
 #[derive(Accounts)]
+#[instruction(market_index: u16)]
 pub struct InitializeMarket<'info> {
     #[account(mut)]
     pub admin: Signer<'info>,
     #[account(
         init,
         payer = admin,
-        space = 8 + 32 + 4 + 64 + 1 + 8 + 2 + 32 + 16,
-        seeds = [MARKET_SEED, admin.key().as_ref()],
+        space = 8 + 32 + 4 + 64 + 1 + 8 + 2 + 32 + 16 + 2,
+        seeds = [MARKET_SEED, admin.key().as_ref(), &market_index.to_le_bytes()],
         bump,
     )]
     pub market: Account<'info, Market>,
@@ -1009,7 +1013,7 @@ pub struct InitializeMarket<'info> {
 pub struct ToggleMarket<'info> {
     #[account(mut)]
     pub admin: Signer<'info>,
-    #[account(mut, seeds = [MARKET_SEED, admin.key().as_ref()], bump)]
+    #[account(mut, seeds = [MARKET_SEED, admin.key().as_ref(), &market.index.to_le_bytes()], bump)]
     pub market: Account<'info, Market>,
 }
 
@@ -1017,7 +1021,7 @@ pub struct ToggleMarket<'info> {
 pub struct SetHouseEdge<'info> {
     #[account(mut)]
     pub admin: Signer<'info>,
-    #[account(mut, seeds = [MARKET_SEED, admin.key().as_ref()], bump)]
+    #[account(mut, seeds = [MARKET_SEED, admin.key().as_ref(), &market.index.to_le_bytes()], bump)]
     pub market: Account<'info, Market>,
 }
 
@@ -1025,7 +1029,7 @@ pub struct SetHouseEdge<'info> {
 pub struct OpenRound<'info> {
     #[account(mut)]
     pub admin: Signer<'info>,
-    #[account(mut, seeds = [MARKET_SEED, admin.key().as_ref()], bump)]
+    #[account(mut, seeds = [MARKET_SEED, admin.key().as_ref(), &market.index.to_le_bytes()], bump)]
     pub market: Account<'info, Market>,
     #[account(
         init,

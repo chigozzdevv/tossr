@@ -15,6 +15,9 @@ import { MAGIC_PROGRAM_ID, MAGIC_CONTEXT_ID } from '@magicblock-labs/ephemeral-r
 import { config } from '@/config/env';
 import { logger } from '@/utils/logger';
 import { DISCRIMINATORS } from '@/utils/anchor-discriminators';
+import { BorshCoder, Idl } from '@coral-xyz/anchor';
+import fs from 'fs';
+import path from 'path';
 
 const TOSSR_PROGRAM_ID = new PublicKey(config.TOSSR_ENGINE_PROGRAM_ID);
 
@@ -26,7 +29,6 @@ const BET_SEED = Buffer.from('bet');
 export class TossrProgramService {
   private connection: Connection;
   private erConnection: Connection;
-
   constructor() {
     this.connection = new Connection(config.SOLANA_RPC_URL);
     this.erConnection = new Connection(config.EPHEMERAL_RPC_URL);
@@ -121,12 +123,12 @@ export class TossrProgramService {
         { pubkey: roundPda, isSigner: false, isWritable: true },
         { pubkey: betPda, isSigner: false, isWritable: true },
         { pubkey: userTokenAccount, isSigner: false, isWritable: true },
+        { pubkey: vaultPda, isSigner: false, isWritable: false },
         { pubkey: vaultTokenAccount, isSigner: false, isWritable: true },
         { pubkey: mint, isSigner: false, isWritable: false },
-        { pubkey: vaultPda, isSigner: false, isWritable: false },
         { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
         { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
       ],
       programId: TOSSR_PROGRAM_ID,
       data: placeBetData,
@@ -181,15 +183,15 @@ export class TossrProgramService {
 
     const instruction = new TransactionInstruction({
       keys: [
-        { pubkey: adminKeypair.publicKey, isSigner: true, isWritable: false },
+        { pubkey: adminKeypair.publicKey, isSigner: true, isWritable: true },
         { pubkey: marketId, isSigner: false, isWritable: false },
         { pubkey: roundPda, isSigner: false, isWritable: true },
         { pubkey: betPda, isSigner: false, isWritable: true },
-        { pubkey: userPublicKey, isSigner: false, isWritable: false },
-        { pubkey: userTokenAccount, isSigner: false, isWritable: true },
-        { pubkey: vaultTokenAccount, isSigner: false, isWritable: true },
-        { pubkey: mint, isSigner: false, isWritable: false },
         { pubkey: vaultPda, isSigner: false, isWritable: false },
+        { pubkey: vaultTokenAccount, isSigner: false, isWritable: true },
+        { pubkey: userTokenAccount, isSigner: false, isWritable: true },
+        { pubkey: userPublicKey, isSigner: false, isWritable: false },
+        { pubkey: mint, isSigner: false, isWritable: false },
         { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
         { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
         { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
@@ -513,7 +515,6 @@ export class TossrProgramService {
     return signature;
   }
 
-  // ER-only reveal variants
   async revealOutcomeER(
     marketId: PublicKey,
     roundNumber: number,
@@ -1063,11 +1064,74 @@ export class TossrProgramService {
   }
 
   async getMarketPda(adminPublicKey: PublicKey): Promise<PublicKey> {
+    const indexBuf = Buffer.alloc(2);
+    indexBuf.writeUInt16LE(0, 0);
     const [marketPda] = PublicKey.findProgramAddressSync(
-      [MARKET_SEED, adminPublicKey.toBuffer()],
+      [MARKET_SEED, adminPublicKey.toBuffer(), indexBuf],
       TOSSR_PROGRAM_ID
     );
     return marketPda;
+  }
+
+  async getMarketPdaByIndex(adminPublicKey: PublicKey, index: number): Promise<PublicKey> {
+    const indexBuf = Buffer.alloc(2);
+    indexBuf.writeUInt16LE(index & 0xffff, 0);
+    const [marketPda] = PublicKey.findProgramAddressSync(
+      [MARKET_SEED, adminPublicKey.toBuffer(), indexBuf],
+      TOSSR_PROGRAM_ID
+    );
+    return marketPda;
+  }
+
+  async initializeMarket(
+    adminKeypair: Keypair,
+    name: string,
+    houseEdgeBps: number,
+    marketTypeDiscriminant: number,
+    index: number,
+    mint: PublicKey,
+  ): Promise<{ signature: string; marketPda: PublicKey }> {
+    const marketPda = await this.getMarketPdaByIndex(adminKeypair.publicKey, index);
+    const idlPath = path.resolve(__dirname, '../../../contracts/anchor/target/idl/tossr_engine.json');
+    const idl = JSON.parse(fs.readFileSync(idlPath, 'utf8')) as Idl;
+    const coder = new BorshCoder(idl as any);
+    const variant = [
+      { PickRange: {} },
+      { EvenOdd: {} },
+      { LastDigit: {} },
+      { ModuloThree: {} },
+      { PatternOfDay: {} },
+      { ShapeColor: {} },
+      { Jackpot: {} },
+      { EntropyBattle: {} },
+      { StreakMeter: {} },
+      { CommunitySeed: {} },
+    ][marketTypeDiscriminant] || { PickRange: {} };
+    const data = coder.instruction.encode('initialize_market', {
+      name,
+      house_edge_bps: houseEdgeBps,
+      market_type: variant,
+      market_index: index,
+    });
+
+    const ix = new TransactionInstruction({
+      keys: [
+        { pubkey: adminKeypair.publicKey, isSigner: true, isWritable: true },
+        { pubkey: marketPda, isSigner: false, isWritable: true },
+        { pubkey: mint, isSigner: false, isWritable: false },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      ],
+      programId: TOSSR_PROGRAM_ID,
+      data,
+    });
+
+    const tx = new Transaction().add(ix);
+    const { blockhash } = await this.connection.getLatestBlockhash();
+    tx.recentBlockhash = blockhash;
+    tx.feePayer = adminKeypair.publicKey;
+    const sig = await this.connection.sendTransaction(tx, [adminKeypair], { skipPreflight: false });
+    await this.connection.confirmTransaction(sig);
+    return { signature: sig, marketPda };
   }
 
   async getBetPda(roundPda: PublicKey, userPublicKey: PublicKey): Promise<PublicKey> {

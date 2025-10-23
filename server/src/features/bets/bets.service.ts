@@ -132,7 +132,8 @@ export class BetsService {
       throw new ValidationError('Transaction not found or failed on-chain');
     }
 
-    const houseEdgeBps = (getMarketConfig(round.market.config as unknown) as any).houseEdgeBps ?? 0;
+    const cfg = getMarketConfig(round.market.config as unknown) as any;
+    const houseEdgeBps: number = typeof cfg?.houseEdgeBps === 'number' ? cfg.houseEdgeBps : 0;
 
     const bet = await db.bet.create({
       data: {
@@ -268,8 +269,8 @@ export class BetsService {
         const counts = [168, 10, 29, 52, 73, 437, 231];
         // map selection.patternId to index: prime=0, fib=1, square=2, endsWith7=3, palindrome=4, even=5, odd=6
         const idx = typeof selection.patternId === 'number' ? selection.patternId : 6;
-        const num = counts[idx] ?? counts[6];
-        return fromProbability(num, 1000);
+        const num = counts[idx] !== undefined ? counts[idx] : counts[6];
+        return fromProbability(num as number, 1000);
       }
 
       case MarketType.COMMUNITY_SEED: {
