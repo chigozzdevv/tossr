@@ -189,26 +189,7 @@ const MARKET_TABS: { key: MarketType; label: string }[] = [
   { key: 'community-seed', label: 'Community' },
 ]
 
-function TrendIndicator({ trend, value }: { trend: TrendType; value: string }) {
-  const colors = {
-    hot: 'var(--accent)',
-    cold: '#f87171',
-    neutral: 'var(--muted)',
-  }
-  
-  const icons = {
-    hot: '↑',
-    cold: '↓',
-    neutral: '→',
-  }
-
-  return (
-    <span style={{ color: colors[trend], fontSize: '0.85rem', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '2px' }}>
-      <span>{icons[trend]}</span>
-      <span>{value}</span>
-    </span>
-  )
-}
+ 
 
 function BetOptionCard({ option, index }: { option: BetOption; index: number }) {
   return (

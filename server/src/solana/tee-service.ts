@@ -1,8 +1,9 @@
 import { Connection } from '@solana/web3.js';
 import { config } from '@/config/env';
 import { logger } from '@/utils/logger';
-import { verifyTeeRpcIntegrity } from '@magicblock-labs/ephemeral-rollups-sdk/privacy';
+import { verifyTeeRpcIntegrity } from '@magicblock-labs/ephemeral-rollups-sdk/privacy/node';
 import { mapServerToTeeMarketType } from '@/utils/market-type-mapper';
+import { createHash } from 'crypto';
 
 interface TeeAttestation {
   round_id: string;
@@ -23,7 +24,7 @@ export class TeeService {
   private integrityOkAt?: number;
 
   constructor() {
-    this.teeRpcUrl = config.TEE_RPC_URL;
+    this.teeRpcUrl = (config.TEE_RPC_URL || '').replace(/\/+$/, '');
     this.connection = new Connection(config.SOLANA_RPC_URL);
   }
 
@@ -138,12 +139,9 @@ export class TeeService {
   }
 
   async getLatestBlockhash(): Promise<Uint8Array> {
-    const blockhash = await this.connection.getLatestBlockhash();
-    const encoder = new TextEncoder();
-    const hashBytes = encoder.encode(blockhash.blockhash);
-    const hash = new Uint8Array(32);
-    hash.set(hashBytes.slice(0, 32));
-    return hash;
+    const { blockhash } = await this.connection.getLatestBlockhash();
+    const digest = createHash('sha256').update(blockhash).digest();
+    return new Uint8Array(digest.subarray(0, 32));
   }
 
 }

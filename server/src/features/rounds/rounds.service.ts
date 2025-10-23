@@ -9,7 +9,7 @@ import { logger } from '@/utils/logger';
 import { Connection, PublicKey } from '@solana/web3.js';
 import { getMarketConfig } from '@/utils/market-config';
 import { roundLifecycleQueue, betSettlementQueue } from '@/jobs/queues';
-import { fetchRoundState as _fetchRoundStateUnused, fetchRoundStateRaw } from '@/solana/round-reader';
+import { fetchRoundStateRaw } from '@/solana/round-reader';
 
 const tossrProgram = new TossrProgramService();
 const teeService = new TeeService();
@@ -46,16 +46,31 @@ export class RoundsService {
       orderBy: { roundNumber: 'desc' },
     });
 
-    const roundNumber = (lastRound?.roundNumber || 0) + 1;
+    let roundNumber = (lastRound?.roundNumber || 0) + 1;
 
-    const { signature, roundPda } = await tossrProgram.openRound(
-      marketPubkey,
-      roundNumber,
-      adminKeypair
-    );
+    let roundPda: PublicKey | null = null;
+    let signature: string | null = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const res = await tossrProgram.openRound(marketPubkey, roundNumber, adminKeypair);
+        signature = res.signature;
+        roundPda = res.roundPda;
+        break;
+      } catch (e: any) {
+        const msg = String(e?.message || '')
+        if (msg.includes('2006') || msg.includes('ConstraintSeeds')) {
+          roundNumber += 1;
+          await new Promise(r => setTimeout(r, 200));
+          continue;
+        }
+        throw e;
+      }
+    }
+    if (!roundPda || !signature) throw new Error('Failed to open round');
 
-    const round = await db.round.create({
-      data: {
+    const round = await db.round.upsert({
+      where: { marketId_roundNumber: { marketId, roundNumber } as any },
+      create: {
         marketId,
         roundNumber,
         status: RoundStatus.PREDICTING,
@@ -63,14 +78,18 @@ export class RoundsService {
         solanaAddress: roundPda.toString(),
         openTxHash: signature,
       },
-    });
+      update: {
+        solanaAddress: roundPda.toString(),
+        openTxHash: signature,
+        status: RoundStatus.PREDICTING,
+      },
+    } as any);
 
     try {
       await this.delegateRoundToER(round.id, marketPubkey);
     } catch (error) {
-      await db.round.delete({ where: { id: round.id } });
-      logger.error({ roundId: round.id, error }, 'Failed to delegate round, rolled back');
-      throw error;
+      logger.error({ roundId: round.id, error }, 'Failed to delegate round');
+      // keep DB row; scheduler can retry delegation
     }
 
     logger.info({ roundId: round.id, roundNumber, signature }, 'Round opened and delegated to ER');
@@ -119,11 +138,21 @@ export class RoundsService {
     const marketConfig = getMarketConfig(round.market.config as unknown);
     const marketPubkey = new PublicKey(marketConfig.solanaAddress);
 
-    const lockTxHash = await tossrProgram.lockRound(
-      marketPubkey,
-      round.roundNumber,
-      adminKeypair
-    );
+    let lockTxHash: string
+    try {
+      lockTxHash = await tossrProgram.lockRound(
+        marketPubkey,
+        round.roundNumber,
+        adminKeypair
+      )
+    } catch (e: any) {
+      const msg = String(e?.message || '')
+      if (msg.includes('6002') || msg.includes('InvalidState')) {
+        lockTxHash = 'already-locked'
+      } else {
+        throw e
+      }
+    }
 
     await db.round.update({
       where: { id: roundId },

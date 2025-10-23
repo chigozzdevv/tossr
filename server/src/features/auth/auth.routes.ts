@@ -5,6 +5,24 @@ const authController = new AuthController();
 
 export async function authRoutes(fastify: FastifyInstance) {
   fastify.post(
+    '/nonce',
+    {
+      schema: {
+        body: {
+          type: 'object',
+          required: ['publicKey'],
+          properties: {
+            publicKey: { type: 'string', minLength: 1 },
+          },
+        },
+        tags: ['Authentication'],
+        summary: 'Get wallet auth nonce',
+        description: 'Generate a one-time nonce for wallet sign-in',
+      },
+    },
+    authController.nonce
+  );
+  fastify.post(
     '/sign-in',
     {
       schema: {

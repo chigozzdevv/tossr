@@ -84,6 +84,12 @@ async function processBetSettlementJob(job: Job<SettleBetsJobData>) {
     data: { status: RoundStatus.SETTLED },
   });
 
+  try {
+    await tossrProgram.settleRound(marketPubkey, round.roundNumber, adminKeypair);
+  } catch (e) {
+    logger.error({ roundId, err: e }, 'On-chain round settle failed');
+  }
+
   logger.info({ roundId }, 'All bets settled for round');
 }
 

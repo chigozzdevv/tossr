@@ -19,7 +19,7 @@ export async function autoLockRounds() {
     });
 
     for (const round of roundsToLock) {
-      await roundLifecycleQueue.add('lock-round', { roundId: round.id });
+      await roundLifecycleQueue.add('lock-round', { roundId: round.id }, { jobId: `lock-${round.id}` });
       logger.info({ roundId: round.id }, 'Auto-lock job scheduled');
     }
 

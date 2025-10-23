@@ -7,6 +7,11 @@ import { asyncHandler } from '@/utils/errors';
 const authService = new AuthService();
 
 export class AuthController {
+  nonce = asyncHandler(async (request: FastifyRequest, reply: FastifyReply) => {
+    const { publicKey } = request.body as { publicKey: string };
+    const result = await authService.createNonce(publicKey);
+    return created(reply, result, 'Nonce issued');
+  });
   signIn = asyncHandler(async (request: FastifyRequest, reply: FastifyReply) => {
     const { message, signature, publicKey } = request.body as {
       message: string;

@@ -199,7 +199,12 @@ export class BetsService {
         return { kind: 5, a: selection.patternId || 0, b: 0, c: 0 };
 
       case MarketType.SHAPE_COLOR:
-        return { kind: 6, a: selection.shape, b: selection.color, c: selection.size };
+        return {
+          kind: 6,
+          a: (selection.shape === undefined || selection.shape === null) ? 255 : selection.shape,
+          b: (selection.color === undefined || selection.color === null) ? 255 : selection.color,
+          c: (selection.size === undefined || selection.size === null) ? 255 : selection.size,
+        };
 
       case MarketType.ENTROPY_BATTLE:
         const sourceMap: Record<string, number> = { tee: 0, chain: 1, sensor: 2 };

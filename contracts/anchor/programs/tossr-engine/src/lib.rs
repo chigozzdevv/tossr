@@ -44,10 +44,10 @@ pub mod tossr_engine {
 
     pub fn initialize_market(
         ctx: Context<InitializeMarket>,
+        market_index: u16,
         name: String,
         house_edge_bps: u16,
         market_type: MarketType,
-        market_index: u16,
     ) -> Result<()> {
         let market = &mut ctx.accounts.market;
         market.admin = ctx.accounts.admin.key();

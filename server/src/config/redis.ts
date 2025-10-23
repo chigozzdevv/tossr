@@ -41,4 +41,5 @@ export const redisKeys = {
   communityRound: (roundId: string) => `community:${roundId}`,
   entropyCache: (source: string) => `entropy:${source}`,
   rateLimit: (identifier: string) => `rate-limit:${identifier}`,
+  authNonce: (pubkey: string) => `auth:nonce:${pubkey}`,
 };

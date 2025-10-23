@@ -305,6 +305,47 @@ export class TossrProgramService {
     return signature;
   }
 
+  async settleRound(
+    marketId: PublicKey,
+    roundNumber: number,
+    adminKeypair: Keypair
+  ): Promise<string> {
+    const roundNumberBuffer = Buffer.alloc(8);
+    roundNumberBuffer.writeBigUInt64LE(BigInt(roundNumber));
+
+    const [roundPda] = PublicKey.findProgramAddressSync(
+      [ROUND_SEED, marketId.toBuffer(), roundNumberBuffer],
+      TOSSR_PROGRAM_ID
+    );
+
+    const data = DISCRIMINATORS.SETTLE_ROUND;
+
+    const instruction = new TransactionInstruction({
+      keys: [
+        { pubkey: adminKeypair.publicKey, isSigner: true, isWritable: true },
+        { pubkey: marketId, isSigner: false, isWritable: false },
+        { pubkey: roundPda, isSigner: false, isWritable: true },
+      ],
+      programId: TOSSR_PROGRAM_ID,
+      data,
+    });
+
+    const transaction = new Transaction().add(instruction);
+    const { blockhash } = await this.connection.getLatestBlockhash();
+    transaction.recentBlockhash = blockhash;
+    transaction.feePayer = adminKeypair.publicKey;
+
+    const signature = await this.connection.sendTransaction(
+      transaction,
+      [adminKeypair],
+      { skipPreflight: false }
+    );
+
+    await this.connection.confirmTransaction(signature);
+
+    return signature;
+  }
+
   async commitOutcomeHash(
     marketId: PublicKey,
     roundNumber: number,
@@ -915,10 +956,11 @@ export class TossrProgramService {
     );
 
     const keys = [
-      { pubkey: payer.publicKey, isSigner: true, isWritable: false },
-      { pubkey: roundPda, isSigner: false, isWritable: true },
+      { pubkey: payer.publicKey, isSigner: true, isWritable: true },
       { pubkey: marketId, isSigner: false, isWritable: false },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: roundPda, isSigner: false, isWritable: true },
+      { pubkey: MAGIC_PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: MAGIC_CONTEXT_ID, isSigner: false, isWritable: true },
     ];
 
     if (validatorPubkey) {

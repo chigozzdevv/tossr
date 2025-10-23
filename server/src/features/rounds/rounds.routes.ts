@@ -1,5 +1,6 @@
 import { FastifyInstance } from 'fastify';
 import { RoundsController } from './rounds.controller';
+import { requireAuth } from '@/features/auth';
 
 const roundsController = new RoundsController();
 
@@ -7,6 +8,7 @@ export async function roundsRoutes(fastify: FastifyInstance) {
   fastify.post(
     '/open',
     {
+      preHandler: [requireAuth],
       schema: {
         tags: ['Rounds'],
         summary: 'Open a new round',
@@ -14,7 +16,7 @@ export async function roundsRoutes(fastify: FastifyInstance) {
         body: {
           type: 'object',
           properties: {
-            marketId: { type: 'string', format: 'uuid' },
+            marketId: { type: 'string', minLength: 1 },
           },
           required: ['marketId'],
         },
@@ -26,6 +28,7 @@ export async function roundsRoutes(fastify: FastifyInstance) {
   fastify.post(
     '/lock',
     {
+      preHandler: [requireAuth],
       schema: {
         tags: ['Rounds'],
         summary: 'Lock a round',
@@ -33,7 +36,7 @@ export async function roundsRoutes(fastify: FastifyInstance) {
         body: {
           type: 'object',
           properties: {
-            roundId: { type: 'string', format: 'uuid' },
+            roundId: { type: 'string', minLength: 1 },
           },
           required: ['roundId'],
         },
@@ -45,6 +48,7 @@ export async function roundsRoutes(fastify: FastifyInstance) {
   fastify.post(
     '/:roundId/undelegate',
     {
+      preHandler: [requireAuth],
       schema: {
         tags: ['Rounds'],
         summary: 'Undelegate round',

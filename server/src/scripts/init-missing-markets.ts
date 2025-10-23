@@ -5,7 +5,7 @@ import { TossrProgramService } from '../solana/tossr-program-service'
 import { Connection, PublicKey } from '@solana/web3.js'
 import { config } from '../config/env'
 
-const MT: Record<string, number> = {
+const MT = {
   PICK_RANGE: 0,
   EVEN_ODD: 1,
   LAST_DIGIT: 2,
@@ -16,7 +16,7 @@ const MT: Record<string, number> = {
   ENTROPY_BATTLE: 7,
   STREAK_METER: 8,
   COMMUNITY_SEED: 9,
-}
+} as const
 
 async function main() {
   const admin = getAdminKeypair()
@@ -40,7 +40,8 @@ async function main() {
       if (pda.equals(marketPk)) { foundIndex = i; break }
     }
     if (foundIndex === null) continue
-    const res = await svc.initializeMarket(admin, m.name, bps, MT[m.type], foundIndex, new PublicKey(mint))
+    const disc = MT[m.type as keyof typeof MT]
+    const res = await svc.initializeMarket(admin, m.name, bps, disc, foundIndex, new PublicKey(mint))
     console.log(JSON.stringify({ name: m.name, index: foundIndex, tx: res.signature, pda: res.marketPda.toString() }))
   }
 }

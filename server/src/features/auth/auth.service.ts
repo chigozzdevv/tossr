@@ -3,19 +3,31 @@ import { generateJWT, verifySolanaMessage } from '@/utils/auth';
 import { AuthenticationError } from '@/shared/errors';
 import { logger } from '@/utils/logger';
 import { randomBytes } from 'crypto';
+import { redis, redisKeys } from '@/config/redis';
 
 export class AuthService {
+  async createNonce(publicKey: string) {
+    if (!publicKey) {
+      throw new AuthenticationError('Missing publicKey');
+    }
+    const nonce = randomBytes(16).toString('hex');
+    await redis.set(redisKeys.authNonce(publicKey), nonce, 'EX', 300);
+    return { nonce, message: `tosr-auth:${nonce}` };
+  }
   async signInWithWallet(message: string, signature: string, publicKey: string) {
     const isValidSignature = await verifySolanaMessage(message, signature, publicKey);
-
     if (!isValidSignature) {
       throw new AuthenticationError('Invalid signature');
     }
-
-    const nonce = `tosr-auth-${randomBytes(4).toString('hex')}`;
-    if (!message.includes(nonce) && !message.includes('tosr-auth')) {
-      throw new AuthenticationError('Invalid auth message format');
+    const stored = await redis.get(redisKeys.authNonce(publicKey));
+    if (!stored) {
+      throw new AuthenticationError('Auth nonce expired');
     }
+    const expected = `tosr-auth:${stored}`;
+    if (message !== expected) {
+      throw new AuthenticationError('Invalid auth message');
+    }
+    await redis.del(redisKeys.authNonce(publicKey));
 
     // Find or create user
     let user = await db.user.findUnique({

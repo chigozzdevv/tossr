@@ -1,12 +1,17 @@
 import { FastifyRequest, FastifyReply } from 'fastify';
 import { RoundsService } from './rounds.service';
 import { success, badRequest } from '@/utils/response';
+import { getAdminKeypair } from '@/config/admin-keypair';
 
 const roundsService = new RoundsService();
 
 export class RoundsController {
   async openRound(req: FastifyRequest, reply: FastifyReply) {
     try {
+      const admin = getAdminKeypair();
+      if (!req.user || req.user.walletAddress.toLowerCase() !== admin.publicKey.toString().toLowerCase()) {
+        return badRequest(reply, 'Unauthorized');
+      }
       const { marketId } = req.body as { marketId: string };
       const round = await roundsService.openRound(marketId);
       return success(reply, round, 'Round opened successfully');
@@ -17,6 +22,10 @@ export class RoundsController {
 
   async lockRound(req: FastifyRequest, reply: FastifyReply) {
     try {
+      const admin = getAdminKeypair();
+      if (!req.user || req.user.walletAddress.toLowerCase() !== admin.publicKey.toString().toLowerCase()) {
+        return badRequest(reply, 'Unauthorized');
+      }
       const { roundId } = req.body as { roundId: string };
       const txHash = await roundsService.lockRound(roundId);
       return success(reply, { txHash }, 'Round locked successfully');
@@ -27,6 +36,10 @@ export class RoundsController {
 
   async undelegateRound(req: FastifyRequest, reply: FastifyReply) {
     try {
+      const admin = getAdminKeypair();
+      if (!req.user || req.user.walletAddress.toLowerCase() !== admin.publicKey.toString().toLowerCase()) {
+        return badRequest(reply, 'Unauthorized');
+      }
       const { roundId } = req.params as { roundId: string };
       const txHash = await roundsService.undelegateRound(roundId);
       return success(reply, { txHash }, 'Round undelegated successfully');

@@ -13,7 +13,7 @@ function args() {
   return out
 }
 
-const MT: Record<string, number> = {
+const MT = {
   PICK_RANGE: 0,
   EVEN_ODD: 1,
   LAST_DIGIT: 2,
@@ -24,12 +24,13 @@ const MT: Record<string, number> = {
   ENTROPY_BATTLE: 7,
   STREAK_METER: 8,
   COMMUNITY_SEED: 9,
-}
+} as const
 
 async function main() {
   const p = args()
   const name = p.name
-  const typeKey = p.type as string | undefined
+  type MarketTypeKey = keyof typeof MT
+  const typeKey = p.type as MarketTypeKey | undefined
   const mint = p.mint
   const index = Number(p.index)
   const bps = Number(p.edge ?? p.bps ?? 0)
@@ -38,7 +39,7 @@ async function main() {
   if (!name || !typeKey || !(typeKey in MT) || !mint || isNaN(index)) {
     throw new Error('Usage: --name=... --type=PICK_RANGE|... --mint=<pubkey> --index=<u16> [--edge=0..10000] [--partition=2|4|10] [--skip=true]')
   }
-  const typeCode = MT[typeKey]
+  const typeCode = MT[typeKey as MarketTypeKey]
 
   const admin = getAdminKeypair()
   const svc = new TossrProgramService()
@@ -70,7 +71,7 @@ async function main() {
     const created = await db.market.create({
       data: {
         name,
-        type: typeKey,
+        type: typeKey as string,
         isActive: true,
         description: null,
         config: {
