@@ -1,5 +1,5 @@
 import { useRef } from 'react'
-import { Section, SectionHeader } from '../../../components/ui/section'
+import { Section, SectionHeader } from '@/components/ui/section'
 import { motion } from 'framer-motion'
 
 type EventItem = {

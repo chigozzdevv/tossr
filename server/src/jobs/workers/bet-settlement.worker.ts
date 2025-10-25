@@ -90,6 +90,21 @@ async function processBetSettlementJob(job: Job<SettleBetsJobData>) {
     logger.error({ roundId, err: e }, 'On-chain round settle failed');
   }
 
+  try {
+    const undelegateTxHash = await tossrProgram.commitAndUndelegateRound(
+      marketPubkey,
+      round.roundNumber,
+      adminKeypair
+    );
+    await db.round.update({
+      where: { id: roundId },
+      data: { undelegateTxHash, settledAt: new Date() },
+    });
+    logger.info({ roundId, undelegateTxHash }, 'Round committed and undelegated');
+  } catch (e) {
+    logger.error({ roundId, err: e }, 'Commit and undelegate failed');
+  }
+
   logger.info({ roundId }, 'All bets settled for round');
 }
 

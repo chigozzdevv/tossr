@@ -1,9 +1,11 @@
 import { roundLifecycleWorker, betSettlementWorker } from './workers';
-import { autoLockRounds, autoOpenRounds } from './schedulers';
+import { autoLockRounds, autoOpenRounds, releaseQueuedRounds } from './schedulers';
+import { config } from '@/config/env';
 import { logger } from '@/utils/logger';
 
 let autoLockInterval: NodeJS.Timeout | null = null;
 let autoOpenInterval: NodeJS.Timeout | null = null;
+let releaseInterval: NodeJS.Timeout | null = null;
 
 export async function initializeJobs() {
   logger.info('Initializing background jobs...');
@@ -12,10 +14,12 @@ export async function initializeJobs() {
   logger.info('Round lifecycle worker started');
   logger.info('Bet settlement worker started');
 
-  autoOpenInterval = setInterval(autoOpenRounds, 10000);
-  autoLockInterval = setInterval(autoLockRounds, 2000);
-  logger.info('Auto-open scheduler started (interval: 3s)');
-  logger.info('Auto-lock scheduler started (interval: 2s)');
+  autoOpenInterval = setInterval(autoOpenRounds, config.ROUND_RELEASE_INTERVAL_SECONDS * 1000);
+  autoLockInterval = setInterval(autoLockRounds, 15000);
+  releaseInterval = setInterval(releaseQueuedRounds, config.ROUND_RELEASE_POLL_SECONDS * 1000);
+  logger.info({ intervalSeconds: config.ROUND_RELEASE_INTERVAL_SECONDS }, 'Auto-open scheduler started');
+  logger.info('Auto-lock scheduler started (interval: 15s)');
+  logger.info({ intervalSeconds: config.ROUND_RELEASE_POLL_SECONDS }, 'Release queued scheduler started');
 
   logger.info('All background jobs initialized');
 }
@@ -30,6 +34,10 @@ export async function shutdownJobs() {
   if (autoOpenInterval) {
     clearInterval(autoOpenInterval);
     autoOpenInterval = null;
+  }
+  if (releaseInterval) {
+    clearInterval(releaseInterval);
+    releaseInterval = null;
   }
 
   await Promise.all([

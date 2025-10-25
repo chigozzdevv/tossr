@@ -1,5 +1,5 @@
-import { Card } from '../../../components/ui/card'
-import { Section, SectionHeader } from '../../../components/ui/section'
+import { Card } from '@/components/ui/card'
+import { Section, SectionHeader } from '@/components/ui/section'
 import { motion } from 'framer-motion'
 
 const steps = [
@@ -36,7 +36,7 @@ const phases = [
       'Cryptographic signature generated',
       'Hash committed on-chain (hidden)'
     ],
-    chips: ['MagicBlock TEE', 'Attestation']
+    chips: ['TEE Attestation', 'Coming Soon: DCAP']
   },
   {
     key: 'settle',

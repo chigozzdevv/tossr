@@ -19,7 +19,18 @@ export async function autoLockRounds() {
     });
 
     for (const round of roundsToLock) {
-      await roundLifecycleQueue.add('lock-round', { roundId: round.id }, { jobId: `lock-${round.id}` });
+      const jobId = `lock-${round.id}`;
+      const existingJob = await roundLifecycleQueue.getJob(jobId);
+
+      if (existingJob) {
+        const state = await existingJob.getState();
+        if (state === 'active' || state === 'waiting' || state === 'delayed') {
+          logger.debug({ roundId: round.id, jobState: state }, 'Lock job already pending, skipping');
+          continue;
+        }
+      }
+
+      await roundLifecycleQueue.add('lock-round', { roundId: round.id }, { jobId });
       logger.info({ roundId: round.id }, 'Auto-lock job scheduled');
     }
 

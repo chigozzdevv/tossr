@@ -1,4 +1,4 @@
-import { Section, SectionHeader } from '../../../components/ui/section'
+import { Section, SectionHeader } from '@/components/ui/section'
 import { motion } from 'framer-motion'
 import { useState } from 'react'
 

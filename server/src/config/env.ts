@@ -13,12 +13,14 @@ const envSchema = z.object({
   SOLANA_WS_URL: z.string().url(),
   EPHEMERAL_RPC_URL: z.string().url(),
   EPHEMERAL_WS_URL: z.string().url(),
+  
   TEE_RPC_URL: z.string().url(),
   TEE_INTEGRITY_REQUIRED: z.string().transform(v => v === 'true').default('false' as any),
   VRF_ORACLE_QUEUE: z.string().min(1, 'VRF_ORACLE_QUEUE is required'),
 
   DELEGATION_PROGRAM_ID: z.string().min(1),
   MAGIC_PROGRAM_ID: z.string().min(1),
+  MAGIC_CONTEXT_ID: z.string().optional().default(''),
   TEE_PROGRAM_ID: z.string().min(1),
   TOSSR_ENGINE_PROGRAM_ID: z.string().min(1),
   ER_VALIDATOR_PUBKEY: z.string().default('MAS1Dt9qreoRMQ14YQuhg8UTZMMzDdKhmkZMECCzk57'),
@@ -33,6 +35,9 @@ const envSchema = z.object({
   RATE_LIMIT_MAX_REQUESTS: z.string().regex(/^\d+$/).transform(Number).default(100),
 
   ROUND_DURATION_SECONDS: z.string().regex(/^\d+$/).transform(Number).default(60),
+  ROUND_RELEASE_INTERVAL_SECONDS: z.string().regex(/^\d+$/).transform(Number).default(60),
+  ROUND_QUEUE_BUFFER_SECONDS: z.string().regex(/^\d+$/).transform(Number).default(15),
+  ROUND_RELEASE_POLL_SECONDS: z.string().regex(/^\d+$/).transform(Number).default(3),
   LOCK_DURATION_SECONDS: z.string().regex(/^\d+$/).transform(Number).default(10),
   JACKPOT_COOLDOWN_HOURS: z.string().regex(/^\d+$/).transform(Number).default(24),
 

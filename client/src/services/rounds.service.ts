@@ -1,22 +1,27 @@
 import { api } from '@/lib/api'
 
-export type RoundStatus = 'PREDICTING' | 'LOCKED' | 'SETTLED'
+export type RoundStatus = 'QUEUED' | 'PREDICTING' | 'LOCKED' | 'REVEALED' | 'SETTLED' | 'FAILED'
 
 export type Round = {
   id: string
   marketId: string
   roundNumber: number
   status: RoundStatus
-  openedAt: string
+  openedAt?: string
   lockedAt?: string
   revealedAt?: string
   settledAt?: string
-  solanaAddress: string
+  queuedAt?: string
+  releasedAt?: string
+  scheduledReleaseAt?: string
+  releaseGroupId?: string
+  solanaAddress?: string
   outcome?: any
   market: {
     id: string
     name: string
     type: string
+    config?: any
   }
   bets?: Array<{
     id: string

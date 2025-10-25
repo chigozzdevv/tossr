@@ -51,10 +51,14 @@ model Round {
   marketId    String
   roundNumber Int
   status      RoundStatus
-  openedAt    DateTime   @default(now())
+  openedAt    DateTime?
   lockedAt    DateTime?
   revealedAt  DateTime?
   settledAt   DateTime?
+  queuedAt    DateTime?
+  releasedAt  DateTime?
+  scheduledReleaseAt DateTime?
+  releaseGroupId     String?
   outcome     Json?
   entropy     Json?
   attestation Json?
@@ -78,6 +82,7 @@ model Round {
 }
 
 enum RoundStatus {
+  QUEUED
   PREDICTING
   LOCKED
   REVEALED

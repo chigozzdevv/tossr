@@ -8,7 +8,7 @@ function args() {
   const out: Record<string, string> = {}
   for (const a of process.argv.slice(2)) {
     const m = a.match(/^--([^=]+)=(.+)$/)
-    if (m) out[m[1]] = m[2]
+    if (m && m[1] && m[2]) out[m[1]] = m[2]
   }
   return out
 }

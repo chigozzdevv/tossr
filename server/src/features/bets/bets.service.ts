@@ -37,6 +37,10 @@ export class BetsService {
       throw new ConflictError('Round is no longer accepting bets');
     }
 
+    if (!round.openedAt) {
+      throw new ConflictError('Round has not started accepting bets');
+    }
+
     const now = Date.now();
     const roundOpenedAt = round.openedAt.getTime();
     const roundDuration = config.ROUND_DURATION_SECONDS * 1000;

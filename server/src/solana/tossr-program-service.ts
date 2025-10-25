@@ -11,7 +11,13 @@ import {
   getAssociatedTokenAddress,
   ASSOCIATED_TOKEN_PROGRAM_ID
 } from '@solana/spl-token';
-import { MAGIC_PROGRAM_ID, MAGIC_CONTEXT_ID } from '@magicblock-labs/ephemeral-rollups-sdk';
+import {
+  MAGIC_CONTEXT_ID as SDK_MAGIC_CONTEXT_ID,
+  MAGIC_PROGRAM_ID as SDK_MAGIC_PROGRAM_ID,
+  delegateBufferPdaFromDelegatedAccountAndOwnerProgram,
+  delegationMetadataPdaFromDelegatedAccount,
+  delegationRecordPdaFromDelegatedAccount,
+} from '@magicblock-labs/ephemeral-rollups-sdk';
 import { config } from '@/config/env';
 import { logger } from '@/utils/logger';
 import { DISCRIMINATORS } from '@/utils/anchor-discriminators';
@@ -20,6 +26,9 @@ import fs from 'fs';
 import path from 'path';
 
 const TOSSR_PROGRAM_ID = new PublicKey(config.TOSSR_ENGINE_PROGRAM_ID);
+const DELEGATION_PROGRAM_PK = new PublicKey(config.DELEGATION_PROGRAM_ID);
+const MAGIC_PROGRAM_PK = SDK_MAGIC_PROGRAM_ID as unknown as PublicKey;
+const MAGIC_CONTEXT_PK = SDK_MAGIC_CONTEXT_ID as unknown as PublicKey;
 
 const MARKET_SEED = Buffer.from('market');
 const ROUND_SEED = Buffer.from('round');
@@ -29,9 +38,13 @@ const BET_SEED = Buffer.from('bet');
 export class TossrProgramService {
   private connection: Connection;
   private erConnection: Connection;
+  private coder: BorshCoder;
   constructor() {
     this.connection = new Connection(config.SOLANA_RPC_URL);
     this.erConnection = new Connection(config.EPHEMERAL_RPC_URL);
+    const idlPath = path.resolve(__dirname, '../../../contracts/anchor/target/idl/tossr_engine.json');
+    const idl = JSON.parse(fs.readFileSync(idlPath, 'utf8')) as Idl;
+    this.coder = new BorshCoder(idl as any);
   }
 
   async setHouseEdgeBps(
@@ -262,6 +275,39 @@ export class TossrProgramService {
     return { signature, roundPda };
   }
 
+  async getMarketState(marketId: PublicKey): Promise<{ lastRound: number; isActive: boolean }> {
+    const info = await this.connection.getAccountInfo(marketId);
+    if (!info) {
+      throw new Error(`Market ${marketId.toBase58()} not initialized on-chain`);
+    }
+
+    let decoded: any;
+    try {
+      decoded = this.coder.accounts.decode('Market', info.data);
+    } catch (error) {
+      logger.error({ marketId: marketId.toBase58(), error }, 'Failed to decode market account');
+      throw error;
+    }
+    const lastRoundSource = decoded.lastRound ?? decoded.last_round ?? 0;
+    const lastRoundValue = typeof lastRoundSource === 'number'
+      ? lastRoundSource
+      : typeof lastRoundSource?.toNumber === 'function'
+        ? lastRoundSource.toNumber()
+        : Number(lastRoundSource ?? 0);
+
+    const activeFlag =
+      typeof decoded.isActive === 'boolean'
+        ? decoded.isActive
+        : typeof decoded.is_active === 'boolean'
+          ? decoded.is_active
+          : Boolean(decoded.isActive ?? decoded.is_active);
+
+    return {
+      lastRound: lastRoundValue,
+      isActive: activeFlag,
+    };
+  }
+
   async lockRound(
     marketId: PublicKey,
     roundNumber: number,
@@ -298,7 +344,7 @@ export class TossrProgramService {
       { skipPreflight: false }
     );
 
-    await this.connection.confirmTransaction(signature);
+    await this.connection.confirmTransaction(signature, 'finalized');
 
     logger.info({ signature, roundPda: roundPda.toString() }, 'Round locked on-chain');
 
@@ -369,7 +415,7 @@ export class TossrProgramService {
 
     const instruction = new TransactionInstruction({
       keys: [
-        { pubkey: adminKeypair.publicKey, isSigner: true, isWritable: false },
+        { pubkey: adminKeypair.publicKey, isSigner: true, isWritable: true },
         { pubkey: marketId, isSigner: false, isWritable: false },
         { pubkey: roundPda, isSigner: false, isWritable: true },
       ],
@@ -388,7 +434,7 @@ export class TossrProgramService {
       { skipPreflight: false }
     );
 
-    await this.connection.confirmTransaction(signature);
+    await this.connection.confirmTransaction(signature, 'finalized');
 
     return signature;
   }
@@ -787,8 +833,8 @@ export class TossrProgramService {
       { pubkey: payer.publicKey, isSigner: true, isWritable: true },
       { pubkey: marketId, isSigner: false, isWritable: false },
       { pubkey: roundPda, isSigner: false, isWritable: true },
-      { pubkey: MAGIC_PROGRAM_ID, isSigner: false, isWritable: false },
-      { pubkey: MAGIC_CONTEXT_ID, isSigner: false, isWritable: true },
+      { pubkey: MAGIC_PROGRAM_PK, isSigner: false, isWritable: false },
+      { pubkey: MAGIC_CONTEXT_PK, isSigner: false, isWritable: true },
     ];
     const ix = new TransactionInstruction({ keys, programId: TOSSR_PROGRAM_ID, data: DISCRIMINATORS.COMMIT_ROUND });
     const tx = new Transaction().add(ix);
@@ -815,8 +861,8 @@ export class TossrProgramService {
       { pubkey: payer.publicKey, isSigner: true, isWritable: true },
       { pubkey: marketId, isSigner: false, isWritable: false },
       { pubkey: roundPda, isSigner: false, isWritable: true },
-      { pubkey: MAGIC_PROGRAM_ID, isSigner: false, isWritable: false },
-      { pubkey: MAGIC_CONTEXT_ID, isSigner: false, isWritable: true },
+      { pubkey: MAGIC_PROGRAM_PK, isSigner: false, isWritable: false },
+      { pubkey: MAGIC_CONTEXT_PK, isSigner: false, isWritable: true },
     ];
     const ix = new TransactionInstruction({ keys, programId: TOSSR_PROGRAM_ID, data: DISCRIMINATORS.COMMIT_AND_UNDELEGATE_ROUND });
     const tx = new Transaction().add(ix);
@@ -955,40 +1001,124 @@ export class TossrProgramService {
       TOSSR_PROGRAM_ID
     );
 
-    const keys = [
-      { pubkey: payer.publicKey, isSigner: true, isWritable: true },
-      { pubkey: marketId, isSigner: false, isWritable: false },
-      { pubkey: roundPda, isSigner: false, isWritable: true },
-      { pubkey: MAGIC_PROGRAM_ID, isSigner: false, isWritable: false },
-      { pubkey: MAGIC_CONTEXT_ID, isSigner: false, isWritable: true },
-    ];
+    await this.waitForAccountInitialization(roundPda);
 
-    if (validatorPubkey) {
-      keys.push({ pubkey: validatorPubkey, isSigner: false, isWritable: false });
-    }
+    const bufferPda = delegateBufferPdaFromDelegatedAccountAndOwnerProgram(roundPda, TOSSR_PROGRAM_ID);
+    const delegationRecordPda = delegationRecordPdaFromDelegatedAccount(roundPda);
+    const delegationMetadataPda = delegationMetadataPdaFromDelegatedAccount(roundPda);
 
     const data = DISCRIMINATORS.DELEGATE_ROUND;
 
-    const instruction = new TransactionInstruction({
-      keys,
-      programId: TOSSR_PROGRAM_ID,
-      data,
-    });
+    const attemptDelegate = async () => {
+      const keys = [
+        { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+        { pubkey: bufferPda, isSigner: false, isWritable: true },
+        { pubkey: delegationRecordPda, isSigner: false, isWritable: true },
+        { pubkey: delegationMetadataPda, isSigner: false, isWritable: true },
+        { pubkey: roundPda, isSigner: false, isWritable: true },
+        { pubkey: marketId, isSigner: false, isWritable: false },
+        { pubkey: roundPda, isSigner: false, isWritable: true },
+        { pubkey: TOSSR_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: DELEGATION_PROGRAM_PK, isSigner: false, isWritable: false },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+        ...(validatorPubkey ? [{ pubkey: validatorPubkey, isSigner: false, isWritable: false }] : []),
+      ];
 
-    const transaction = new Transaction().add(instruction);
-    const { blockhash } = await this.connection.getLatestBlockhash();
-    transaction.recentBlockhash = blockhash;
-    transaction.feePayer = payer.publicKey;
+      const instruction = new TransactionInstruction({
+        keys,
+        programId: TOSSR_PROGRAM_ID,
+        data,
+      });
 
-    const signature = await this.connection.sendTransaction(transaction, [payer], {
-      skipPreflight: false,
-    });
+      const transaction = new Transaction().add(instruction);
+      const { blockhash } = await this.connection.getLatestBlockhash();
+      transaction.recentBlockhash = blockhash;
+      transaction.feePayer = payer.publicKey;
 
-    await this.connection.confirmTransaction(signature);
+      const signature = await this.connection.sendTransaction(transaction, [payer], {
+        skipPreflight: false,
+      });
 
-    logger.info({ signature, roundPda: roundPda.toString() }, 'Round delegated');
+      await this.connection.confirmTransaction(signature);
 
-    return signature;
+      logger.info({ signature, roundPda: roundPda.toString() }, 'Round delegated');
+
+      return signature;
+    };
+
+    const maxAttempts = 4;
+    let lastError: unknown;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        if (attempt > 0) {
+          await this.sleep(750 * attempt);
+          await this.waitForAccountInitialization(roundPda);
+        }
+        return await attemptDelegate();
+      } catch (err: any) {
+        const message = String(err?.message || '');
+        if (
+          message.includes('AccountNotInitialized') ||
+          message.includes('not initialized on-chain') ||
+          message.includes('0xbc4')
+        ) {
+          lastError = err;
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw lastError;
+  }
+
+  async ensureRoundUndelegated(
+    marketId: PublicKey,
+    roundNumber: number,
+    payer: Keypair
+  ): Promise<void> {
+    const roundNumberBuffer = Buffer.alloc(8);
+    roundNumberBuffer.writeBigUInt64LE(BigInt(roundNumber));
+    const [roundPda] = PublicKey.findProgramAddressSync(
+      [ROUND_SEED, marketId.toBuffer(), roundNumberBuffer],
+      TOSSR_PROGRAM_ID
+    );
+
+    const account = await this.connection.getAccountInfo(roundPda, 'finalized');
+    if (account && account.owner.equals(TOSSR_PROGRAM_ID)) {
+      return;
+    }
+
+    await this.commitAndUndelegateRoundER(marketId, roundNumber, payer);
+
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const info = await this.connection.getAccountInfo(roundPda, 'finalized');
+      if (info && info.owner.equals(TOSSR_PROGRAM_ID) && info.data.length > 0) {
+        return;
+      }
+      await this.sleep(500 * (attempt + 1));
+    }
+
+    throw new Error(`Round account ${roundPda.toBase58()} is still delegated after commit/undelegate`);
+  }
+
+  private async waitForAccountInitialization(
+    pubkey: PublicKey,
+    timeoutMs = 45000,
+    intervalMs = 1000
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const info = await this.connection.getAccountInfo(pubkey, 'finalized');
+      if (info && info.data.length > 0 && info.owner.equals(TOSSR_PROGRAM_ID)) {
+        return;
+      }
+      await this.sleep(intervalMs);
+    }
+    throw new Error(`Account ${pubkey.toBase58()} not initialized on-chain`);
+  }
+
+  private async sleep(ms: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   async commitRoundState(
@@ -1008,8 +1138,8 @@ export class TossrProgramService {
       { pubkey: payer.publicKey, isSigner: true, isWritable: true },
       { pubkey: marketId, isSigner: false, isWritable: false },
       { pubkey: roundPda, isSigner: false, isWritable: true },
-      { pubkey: MAGIC_PROGRAM_ID, isSigner: false, isWritable: false },
-      { pubkey: MAGIC_CONTEXT_ID, isSigner: false, isWritable: true },
+      { pubkey: MAGIC_PROGRAM_PK, isSigner: false, isWritable: false },
+      { pubkey: MAGIC_CONTEXT_PK, isSigner: false, isWritable: true },
     ];
 
     const data = DISCRIMINATORS.COMMIT_ROUND;
@@ -1021,15 +1151,15 @@ export class TossrProgramService {
     });
 
     const transaction = new Transaction().add(instruction);
-    const { blockhash } = await this.connection.getLatestBlockhash();
+    const { blockhash } = await this.erConnection.getLatestBlockhash();
     transaction.recentBlockhash = blockhash;
     transaction.feePayer = payer.publicKey;
 
-    const signature = await this.connection.sendTransaction(transaction, [payer], {
+    const signature = await this.erConnection.sendTransaction(transaction, [payer], {
       skipPreflight: false,
     });
 
-    await this.connection.confirmTransaction(signature);
+    await this.erConnection.confirmTransaction(signature);
 
     logger.info({ signature, roundPda: roundPda.toString() }, 'Round state committed');
 
@@ -1053,8 +1183,8 @@ export class TossrProgramService {
       { pubkey: payer.publicKey, isSigner: true, isWritable: true },
       { pubkey: marketId, isSigner: false, isWritable: false },
       { pubkey: roundPda, isSigner: false, isWritable: true },
-      { pubkey: MAGIC_PROGRAM_ID, isSigner: false, isWritable: false },
-      { pubkey: MAGIC_CONTEXT_ID, isSigner: false, isWritable: true },
+      { pubkey: MAGIC_PROGRAM_PK, isSigner: false, isWritable: false },
+      { pubkey: MAGIC_CONTEXT_PK, isSigner: false, isWritable: true },
     ];
 
     const data = DISCRIMINATORS.COMMIT_AND_UNDELEGATE_ROUND;
@@ -1066,15 +1196,15 @@ export class TossrProgramService {
     });
 
     const transaction = new Transaction().add(instruction);
-    const { blockhash } = await this.connection.getLatestBlockhash();
+    const { blockhash } = await this.erConnection.getLatestBlockhash();
     transaction.recentBlockhash = blockhash;
     transaction.feePayer = payer.publicKey;
 
-    const signature = await this.connection.sendTransaction(transaction, [payer], {
+    const signature = await this.erConnection.sendTransaction(transaction, [payer], {
       skipPreflight: false,
     });
 
-    await this.connection.confirmTransaction(signature);
+    await this.erConnection.confirmTransaction(signature);
 
     logger.info({ signature, roundPda: roundPda.toString() }, 'Round committed and undelegated');
 

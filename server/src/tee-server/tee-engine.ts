@@ -38,9 +38,7 @@ export interface TeeAttestation {
   timestamp: number;
 }
 
-const DEV_DEFAULT_TEE_KEY_HEX = '62bb8ebe78f681f2c6c7c30c9d2625b0cf243e6400f5a3976ad57132a6360621';
-const EFFECTIVE_TEE_KEY_HEX = config.TEE_PRIVATE_KEY_HEX || (config.NODE_ENV === 'development' ? DEV_DEFAULT_TEE_KEY_HEX : '');
-const TEE_PRIVATE_KEY_BYTES: Uint8Array | null = EFFECTIVE_TEE_KEY_HEX ? hexToBytes(EFFECTIVE_TEE_KEY_HEX) : null;
+const TEE_PRIVATE_KEY_BYTES: Uint8Array | null = config.TEE_PRIVATE_KEY_HEX ? hexToBytes(config.TEE_PRIVATE_KEY_HEX) : null;
 const TEE_PUBLIC_KEY: Uint8Array | null = TEE_PRIVATE_KEY_BYTES ? secp256k1.getPublicKey(TEE_PRIVATE_KEY_BYTES, false) : null;
 
 export class TeeEngine {

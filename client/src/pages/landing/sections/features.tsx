@@ -1,5 +1,5 @@
-import { Card } from '../../../components/ui/card'
-import { Section, SectionHeader } from '../../../components/ui/section'
+import { Card } from '@/components/ui/card'
+import { Section, SectionHeader } from '@/components/ui/section'
 import { motion } from 'framer-motion'
 
 export function FeaturesSection() {

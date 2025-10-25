@@ -1,9 +1,10 @@
 import { Connection } from '@solana/web3.js';
 import { config } from '@/config/env';
 import { logger } from '@/utils/logger';
-import { verifyTeeRpcIntegrity } from '@magicblock-labs/ephemeral-rollups-sdk/privacy/node';
 import { mapServerToTeeMarketType } from '@/utils/market-type-mapper';
-import { createHash } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
+import { createRequire } from 'module';
+import { readFile } from 'fs/promises';
 
 interface TeeAttestation {
   round_id: string;
@@ -28,6 +29,39 @@ export class TeeService {
     this.connection = new Connection(config.SOLANA_RPC_URL);
   }
 
+  private async verifyTeeRpcIntegrityNode(rpcUrl: string): Promise<boolean> {
+    const challengeBytes = randomBytes(32);
+    const challenge = challengeBytes.toString('base64');
+    const url = `${rpcUrl}/quote?challenge=${encodeURIComponent(challenge)}`;
+    const response = await fetch(url);
+    const body: unknown = await response.json();
+    const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null;
+    if (response.status !== 200) {
+      const msg = isObj(body) && typeof body.error === 'string' ? (body.error as string) : `HTTP ${response.status}`;
+      throw new Error(msg || 'Failed to get quote');
+    }
+    if (!isObj(body) || typeof body.quote !== 'string') {
+      throw new Error('Invalid quote response');
+    }
+
+    const { default: init, js_get_collateral, js_verify } = await import('@phala/dcap-qvl-web');
+    const require = createRequire(import.meta.url);
+    const wasmPath = require.resolve('@phala/dcap-qvl-web/dcap-qvl-web_bg.wasm');
+    const wasmBytes = await readFile(wasmPath);
+    await init(wasmBytes);
+
+    const rawQuote = Uint8Array.from(Buffer.from(body.quote as string, 'base64'));
+    const pccsUrl = 'https://pccs.phala.network/tdx/certification/v4';
+    const quoteCollateral = await js_get_collateral(pccsUrl, rawQuote);
+    const now = BigInt(Math.floor(Date.now() / 1000));
+    try {
+      js_verify(rawQuote, quoteCollateral, now);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async generateOutcome(
     roundId: string,
     marketType: string,
@@ -37,11 +71,10 @@ export class TeeService {
     } = {}
   ): Promise<TeeAttestation> {
     try {
-      // Enforce integrity if required
       if (config.TEE_INTEGRITY_REQUIRED) {
         const now = Date.now();
         if (!this.integrityOkAt || now - this.integrityOkAt > 10 * 60 * 1000) {
-          const ok = await verifyTeeRpcIntegrity(this.teeRpcUrl);
+          const ok = await this.verifyTeeRpcIntegrityNode(this.teeRpcUrl);
           if (!ok) {
             throw new Error('TEE integrity verification failed');
           }

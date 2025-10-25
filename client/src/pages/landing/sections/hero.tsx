@@ -1,5 +1,5 @@
-import { ParticleField } from '../../../components/animations/particle-field'
-import { Button } from '../../../components/ui/button'
+import { ParticleField } from '@/components/animations/particle-field'
+import { Button } from '@/components/ui/button'
 
 export function Hero() {
   return (

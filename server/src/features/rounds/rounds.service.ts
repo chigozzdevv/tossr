@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { db } from '@/config/database';
 import { RoundStatus } from '@/shared/types';
 import { NotFoundError, ConflictError } from '@/shared/errors';
@@ -16,8 +17,10 @@ const teeService = new TeeService();
 
 const ER_VALIDATOR = new PublicKey(config.ER_VALIDATOR_PUBKEY);
 
+type RoundWithMarket = Prisma.RoundGetPayload<{ include: { market: true } }>;
+
 export class RoundsService {
-  async openRound(marketId: string) {
+  async queueRound(marketId: string, scheduledReleaseAt: Date, releaseGroupId: string) {
     const market = await db.market.findUnique({ where: { id: marketId } });
     if (!market) {
       throw new NotFoundError('Market');
@@ -27,72 +30,192 @@ export class RoundsService {
       throw new ConflictError('Market is not active');
     }
 
-    const existingActiveRound = await db.round.findFirst({
+    const conflictingRound = await db.round.findFirst({
       where: {
         marketId,
-        status: { in: [RoundStatus.PREDICTING, RoundStatus.LOCKED] },
+        status: { in: [RoundStatus.PREDICTING, RoundStatus.LOCKED, RoundStatus.QUEUED] },
       },
     });
 
-    if (existingActiveRound) {
-      throw new ConflictError('Market already has an active round');
+    if (conflictingRound) {
+      logger.debug({ marketId, roundId: conflictingRound.id, status: conflictingRound.status }, 'Market already has queued or active round, skipping queue');
+      return conflictingRound;
     }
 
-    const adminKeypair = getAdminKeypair();
-    const marketConfig = getMarketConfig(market.config as unknown);
-    const marketPubkey = new PublicKey(marketConfig.solanaAddress);
     const lastRound = await db.round.findFirst({
       where: { marketId },
       orderBy: { roundNumber: 'desc' },
     });
 
-    let roundNumber = (lastRound?.roundNumber || 0) + 1;
+    const nextRoundNumber = (lastRound?.roundNumber || 0) + 1;
+
+    const round = await db.round.create({
+      data: {
+        marketId,
+        roundNumber: nextRoundNumber,
+        status: RoundStatus.QUEUED,
+        queuedAt: new Date(),
+        scheduledReleaseAt,
+        releaseGroupId,
+      },
+    });
+
+    logger.info({ marketId, roundId: round.id, releaseGroupId, scheduledReleaseAt }, 'Queued round for batch release');
+    return round;
+  }
+
+  async releaseQueuedRound(roundId: string) {
+    const queuedRound = await db.round.findUnique({
+      where: { id: roundId },
+      include: { market: true },
+    });
+
+    if (!queuedRound) {
+      throw new NotFoundError('Round');
+    }
+
+    if (queuedRound.status !== RoundStatus.QUEUED) {
+      logger.debug({ roundId, status: queuedRound.status }, 'Round not queued, skipping release');
+      return queuedRound;
+    }
+
+    return this.openRound(queuedRound.marketId, { queuedRound });
+  }
+
+  async openRound(marketId: string, options?: { queuedRound?: RoundWithMarket }) {
+    const queuedRound = options?.queuedRound ?? null;
+    const market = queuedRound?.market ?? await db.market.findUnique({ where: { id: marketId } });
+    if (!market) {
+      throw new NotFoundError('Market');
+    }
+
+    if (!market.isActive) {
+      throw new ConflictError('Market is not active');
+    }
+
+    if (!queuedRound) {
+      const existingActiveRound = await db.round.findFirst({
+        where: {
+          marketId,
+          status: { in: [RoundStatus.PREDICTING, RoundStatus.LOCKED] },
+        },
+      });
+
+      if (existingActiveRound) {
+        const betCount = await db.bet.count({ where: { roundId: existingActiveRound.id } });
+        const hasBets = betCount > 0;
+        if (existingActiveRound.status === RoundStatus.PREDICTING || hasBets) {
+          throw new ConflictError('Market already has an active round');
+        }
+      }
+    }
+
+    const adminKeypair = getAdminKeypair();
+    const marketConfig = getMarketConfig(market.config as unknown);
+    const marketPubkey = new PublicKey(marketConfig.solanaAddress);
+    const marketState = await tossrProgram.getMarketState(marketPubkey);
+
+    if (!marketState.isActive) {
+      throw new ConflictError('Market is not active on-chain');
+    }
+
+    const lastRound = await db.round.findFirst({
+      where: { marketId },
+      orderBy: { roundNumber: 'desc' },
+    });
+
+    const desiredRound = queuedRound?.roundNumber ?? (lastRound?.roundNumber || 0) + 1;
+    const nextOnChainRound = marketState.lastRound + 1;
+    let roundNumber = Math.max(desiredRound, nextOnChainRound);
+
+    const syncQueuedRoundNumber = async () => {
+      if (queuedRound && queuedRound.roundNumber !== roundNumber) {
+        queuedRound.roundNumber = roundNumber;
+        await db.round.update({
+          where: { id: queuedRound.id },
+          data: { roundNumber },
+        });
+      }
+    };
+
+    await syncQueuedRoundNumber();
 
     let roundPda: PublicKey | null = null;
     let signature: string | null = null;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < 8; attempt++) {
       try {
         const res = await tossrProgram.openRound(marketPubkey, roundNumber, adminKeypair);
         signature = res.signature;
         roundPda = res.roundPda;
         break;
       } catch (e: any) {
-        const msg = String(e?.message || '')
+        lastError = e;
+        const msg = String(e?.message || '');
         if (msg.includes('2006') || msg.includes('ConstraintSeeds')) {
-          roundNumber += 1;
-          await new Promise(r => setTimeout(r, 200));
+          const refreshedState = await tossrProgram.getMarketState(marketPubkey);
+          roundNumber = Math.max(roundNumber + 1, refreshedState.lastRound + 1);
+          await syncQueuedRoundNumber();
+          await new Promise((resolve) => setTimeout(resolve, 200));
           continue;
         }
         throw e;
       }
     }
-    if (!roundPda || !signature) throw new Error('Failed to open round');
 
-    const round = await db.round.upsert({
-      where: { marketId_roundNumber: { marketId, roundNumber } as any },
-      create: {
-        marketId,
-        roundNumber,
-        status: RoundStatus.PREDICTING,
-        openedAt: new Date(),
-        solanaAddress: roundPda.toString(),
-        openTxHash: signature,
-      },
-      update: {
-        solanaAddress: roundPda.toString(),
-        openTxHash: signature,
-        status: RoundStatus.PREDICTING,
-      },
-    } as any);
+    if (!roundPda || !signature) {
+      const detail = lastError instanceof Error ? lastError.message : lastError ? String(lastError) : 'unknown error';
+      logger.error({ marketId, roundNumber, error: detail }, 'Failed to open round');
+      throw new Error(`Failed to open round: ${detail}`);
+    }
+
+    const openedAt = new Date();
+
+    let round;
+    if (queuedRound) {
+      round = await db.round.update({
+        where: { id: queuedRound.id },
+        data: {
+          roundNumber,
+          status: RoundStatus.PREDICTING,
+          openedAt,
+          releasedAt: openedAt,
+          solanaAddress: roundPda.toString(),
+          openTxHash: signature,
+        },
+      });
+    } else {
+      round = await db.round.upsert({
+        where: { marketId_roundNumber: { marketId, roundNumber } as any },
+        create: {
+          marketId,
+          roundNumber,
+          status: RoundStatus.PREDICTING,
+          openedAt,
+          releasedAt: openedAt,
+          solanaAddress: roundPda.toString(),
+          openTxHash: signature,
+        },
+        update: {
+          solanaAddress: roundPda.toString(),
+          openTxHash: signature,
+          status: RoundStatus.PREDICTING,
+          openedAt,
+          releasedAt: openedAt,
+          scheduledReleaseAt: null,
+          releaseGroupId: null,
+          queuedAt: null,
+        },
+      } as any);
+    }
 
     try {
       await this.delegateRoundToER(round.id, marketPubkey);
+      logger.info({ roundId: round.id, roundNumber, signature }, 'Round opened and delegated to ER');
     } catch (error) {
       logger.error({ roundId: round.id, error }, 'Failed to delegate round');
-      // keep DB row; scheduler can retry delegation
+      throw error;
     }
-
-    logger.info({ roundId: round.id, roundNumber, signature }, 'Round opened and delegated to ER');
 
     return round;
   }
@@ -103,6 +226,12 @@ export class RoundsService {
 
     if (!round) {
       throw new NotFoundError('Round');
+    }
+
+    const connection = new Connection(config.SOLANA_RPC_URL);
+    const marketInfo = await connection.getAccountInfo(marketPubkey);
+    if (!marketInfo) {
+      throw new Error(`Market ${marketPubkey.toString()} not initialized on-chain`);
     }
 
     const delegateTxHash = await tossrProgram.delegateRound(
@@ -130,6 +259,11 @@ export class RoundsService {
       throw new NotFoundError('Round');
     }
 
+    if (round.status === RoundStatus.LOCKED || round.status === RoundStatus.SETTLED) {
+      logger.info({ roundId, status: round.status }, 'Round already locked or settled, skipping');
+      return round.lockTxHash || 'already-locked';
+    }
+
     if (round.status !== RoundStatus.PREDICTING) {
       throw new ConflictError('Round is not in predicting state');
     }
@@ -138,19 +272,30 @@ export class RoundsService {
     const marketConfig = getMarketConfig(round.market.config as unknown);
     const marketPubkey = new PublicKey(marketConfig.solanaAddress);
 
-    let lockTxHash: string
+    if (round.delegateTxHash) {
+      await tossrProgram.ensureRoundUndelegated(marketPubkey, round.roundNumber, adminKeypair);
+    }
+
+    let lockTxHash: string;
     try {
       lockTxHash = await tossrProgram.lockRound(
         marketPubkey,
         round.roundNumber,
         adminKeypair
-      )
+      );
     } catch (e: any) {
-      const msg = String(e?.message || '')
+      const msg = String(e?.message || '');
       if (msg.includes('6002') || msg.includes('InvalidState')) {
-        lockTxHash = 'already-locked'
+        lockTxHash = 'already-locked';
+      } else if (msg.includes('3007') || msg.includes('AccountOwnedByWrongProgram')) {
+        await tossrProgram.ensureRoundUndelegated(marketPubkey, round.roundNumber, adminKeypair);
+        lockTxHash = await tossrProgram.lockRound(
+          marketPubkey,
+          round.roundNumber,
+          adminKeypair
+        );
       } else {
-        throw e
+        throw e;
       }
     }
 
@@ -164,6 +309,16 @@ export class RoundsService {
     });
 
     logger.info({ roundId, lockTxHash }, 'Round locked');
+
+    const betCount = await db.bet.count({ where: { roundId } });
+    if (betCount === 0) {
+      await db.round.update({
+        where: { id: roundId },
+        data: { status: RoundStatus.FAILED, settledAt: new Date() },
+      });
+      logger.info({ roundId }, 'Round expired (no bets)');
+      return lockTxHash;
+    }
 
     await this.generateAndCommitOutcome(roundId);
 
@@ -194,6 +349,8 @@ export class RoundsService {
 
     const commitmentHash = Buffer.from(attestation.commitment_hash, 'hex');
     const attestationSig = Buffer.from(attestation.signature, 'hex');
+
+    await new Promise(r => setTimeout(r, 6000));
 
     const commitTxHash = await tossrProgram.commitOutcomeHash(
       marketPubkey,
@@ -333,6 +490,7 @@ export class RoundsService {
       data: {
         revealTxHash,
         revealedAt: new Date(),
+        status: RoundStatus.REVEALED,
         outcome: JSON.stringify(outcome),
       },
     });
@@ -415,6 +573,15 @@ export class RoundsService {
       throw new NotFoundError('Round');
     }
 
+    if (!round.delegateTxHash) {
+      await db.round.update({
+        where: { id: roundId },
+        data: { status: RoundStatus.SETTLED, settledAt: new Date() },
+      });
+      logger.warn({ roundId }, 'Round was never delegated, marked SETTLED without undelegation');
+      return;
+    }
+
     const marketConfig = getMarketConfig(round.market.config as unknown);
     const marketPubkey = new PublicKey(marketConfig.solanaAddress);
     const adminKeypair = getAdminKeypair();
@@ -471,7 +638,9 @@ export class RoundsService {
 
   async getActiveRounds(marketId?: string) {
     const where: any = {
-      status: { in: [RoundStatus.PREDICTING, RoundStatus.LOCKED] },
+      status: {
+        in: [RoundStatus.PREDICTING, RoundStatus.QUEUED],
+      },
     };
 
     if (marketId) {
@@ -482,10 +651,17 @@ export class RoundsService {
       where,
       include: {
         market: {
-          select: { name: true, type: true },
+          select: { id: true, name: true, type: true, config: true },
+        },
+        _count: {
+          select: { bets: true },
         },
       },
-      orderBy: { openedAt: 'desc' },
+      orderBy: [
+        { status: 'desc' },
+        { scheduledReleaseAt: 'asc' },
+        { openedAt: 'desc' },
+      ],
     });
 
     return rounds;

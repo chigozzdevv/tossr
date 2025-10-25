@@ -1,4 +1,8 @@
 import { z } from 'zod';
+import { RoundStatus as PrismaRoundStatus } from '@prisma/client';
+
+export const RoundStatus = PrismaRoundStatus;
+export type RoundStatus = PrismaRoundStatus;
 
 // Common response types
 export interface ApiResponse<T = any> {
@@ -42,14 +46,6 @@ export enum MarketType {
   ENTROPY_BATTLE = 'ENTROPY_BATTLE',
   STREAK_METER = 'STREAK_METER',
   COMMUNITY_SEED = 'COMMUNITY_SEED',
-}
-
-export enum RoundStatus {
-  PREDICTING = 'PREDICTING',
-  LOCKED = 'LOCKED',
-  REVEALED = 'REVEALED',
-  SETTLED = 'SETTLED',
-  FAILED = 'FAILED',
 }
 
 export enum BetStatus {

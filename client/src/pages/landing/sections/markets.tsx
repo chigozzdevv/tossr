@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion'
-import { Section, SectionHeader } from '../../../components/ui/section'
+import { Section, SectionHeader } from '@/components/ui/section'
 import { useEffect, useMemo, useState, useRef } from 'react'
 
 type MarketType = 'range' | 'parity' | 'last-digit' | 'modulo-3' | 'pattern' | 'shape-color' | 'jackpot' | 'community-seed' | 'entropy-battle' | 'streak-meter'
