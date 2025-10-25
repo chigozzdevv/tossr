@@ -10,11 +10,11 @@ type FaqItem = {
 const faqs: FaqItem[] = [
   {
     question: 'How does Tossr ensure fair outcomes?',
-    answer: 'Tossr uses MagicBlock TEE (Trusted Execution Environment) to generate provably fair outcomes. The TEE creates a cryptographic commitment hash before revealing the result, making it impossible to manipulate outcomes after bets are placed. All attestations are verifiable on-chain.'
+    answer: 'Tossr combines MagicBlock VRF randomness with a Private Ephemeral Rollup (PER) enclave. The enclave executes the outcome logic, signs an attestation with its measurement and inputs hash, and anchors that commitment to Solana before any reveal. Because the proof is sealed in hardware, results cannot be altered after bets lock.'
   },
   {
     question: 'What makes betting on Tossr different?',
-    answer: 'Unlike traditional betting platforms, Tossr operates entirely on-chain with verifiable randomness. Every outcome is generated in a secure TEE, cryptographically signed, and verified by smart contracts on Solana. You can independently verify the fairness of every round.'
+    answer: 'Unlike Web2 books, Tossr settles rounds with on-chain programs that verify PER attestations and VRF transcripts. Every market uses the same SOL vaults, and anyone can inspect the randomness, enclave measurement, and settlement transaction directly on Solana.'
   },
   {
     question: 'How fast are payouts?',
@@ -22,11 +22,11 @@ const faqs: FaqItem[] = [
   },
   {
     question: 'What are the fees?',
-    answer: 'Tossr uses Ephemeral Rollups to minimize transaction costs. Market-specific house edges are transparently displayed in the odds. There are no hidden fees - what you see is what you get.'
+    answer: 'Tossr uses MagicBlock Ephemeral Rollups for low-latency execution while anchoring proofs back to Solana. Market-specific house edges are transparently displayed in the odds. There are no hidden fees—what you see is what you get.'
   },
   {
     question: 'Can I verify the randomness?',
-    answer: 'Absolutely! Every round includes TEE attestation signatures and commitment hashes that you can verify independently. Check the "Learn about TEE" link in the How it Works section for technical details on verification.'
+    answer: 'Absolutely. Each reveal publishes the VRF output, the PER attestation signature, enclave measurement, and the commitment hash. You can recompute the expected hash and validate the proof against our Solana verifier or the MagicBlock tooling linked above.'
   },
   {
     question: 'What tokens can I use to bet?',

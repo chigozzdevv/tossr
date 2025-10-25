@@ -339,12 +339,60 @@ export class RoundsService {
     const marketConfig = getMarketConfig(round.market.config as unknown);
     const marketPubkey = new PublicKey(marketConfig.solanaAddress);
 
+    const oracleQueue = new PublicKey(config.VRF_ORACLE_QUEUE);
+    const clientSeed = round.roundNumber % 256;
+
+    try {
+      await tossrProgram.requestRandomnessER(
+        marketPubkey,
+        round.roundNumber,
+        clientSeed,
+        adminKeypair,
+        oracleQueue
+      );
+      logger.info({ roundId, roundNumber: round.roundNumber }, 'VRF randomness requested');
+    } catch (error: any) {
+      const msg = String(error?.message || 'unknown error');
+      if (!msg.includes('already')) {
+        logger.error({ roundId, roundNumber: round.roundNumber, error: msg }, 'Failed to request VRF randomness');
+        throw error;
+      }
+    }
+
+    const roundPda = await tossrProgram.getRoundPda(marketPubkey, round.roundNumber);
+    const baseConnection = new Connection(config.SOLANA_RPC_URL);
+    const erConnection = new Connection(config.EPHEMERAL_RPC_URL);
+    const isZeroHex = (value: string | null) => !value || /^0+$/.test(value);
+
+    let randomnessHex: string | null = null;
+    for (let attempt = 0; attempt < 30; attempt++) {
+      const [erState, baseState] = await Promise.all([
+        fetchRoundStateRaw(erConnection, roundPda),
+        fetchRoundStateRaw(baseConnection, roundPda),
+      ]);
+      const state = erState && !isZeroHex(erState.inputsHash) ? erState : baseState;
+      if (state && state.inputsHash && !isZeroHex(state.inputsHash)) {
+        randomnessHex = state.inputsHash;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+
+    if (!randomnessHex) {
+      throw new Error('VRF randomness not received within timeout window');
+    }
+
+    const vrfRandomness = Buffer.from(randomnessHex, 'hex');
+    if (vrfRandomness.length !== 32) {
+      throw new Error('VRF randomness length mismatch');
+    }
+
     const chainHash = await teeService.getLatestBlockhash();
 
     const attestation = await teeService.generateOutcome(
       roundId,
       round.market.type,
-      { chainHash }
+      { chainHash, vrfRandomness }
     );
 
     const commitmentHash = Buffer.from(attestation.commitment_hash, 'hex');

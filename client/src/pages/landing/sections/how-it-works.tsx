@@ -17,39 +17,38 @@ const phases = [
   {
     key: 'prepare',
     title: 'Round Setup',
-    sub: 'Initialize round and collect bets',
+    sub: 'Initialize round, request randomness, collect bets',
     items: [
-      'New round opens automatically',
-      'Delegated to MagicBlock ER for speed',
-      'Players place bets with tokens',
-      'Round locks when timer expires'
+      'New round opens automatically on Tossr Engine',
+      'MagicBlock ER queues a VRF request for the round',
+      'Players place SOL bets via delegated accounts',
+      'Round locks when the countdown expires'
     ],
-    chips: ['Solana', 'MagicBlock ER']
+    chips: ['Solana', 'MagicBlock ER', 'MagicBlock VRF']
   },
   {
     key: 'prove',
-    title: 'Verifiable Generation',
-    sub: 'TEE generates provably fair outcome',
+    title: 'Attested Generation',
+    sub: 'PER enclave executes outcome logic with sealed inputs',
     items: [
-      'TEE derives outcome from chain data',
-      'SHA256 commitment hash created',
-      'Cryptographic signature generated',
-      'Hash committed on-chain (hidden)'
+      'MagicBlock VRF returns 32-byte randomness to the enclave',
+      'PER runtime computes market outcome from randomness + inputs',
+      'Enclave signs an attestation with measurement & inputs hash',
+      'Commitment recorded inside ER and mirrored to Solana'
     ],
-    chips: ['TEE Attestation', 'Coming Soon: DCAP']
+    chips: ['MagicBlock PER', 'Attestation']
   },
   {
     key: 'settle',
     title: 'Settlement',
-    sub: 'Reveal, verify and payout',
+    sub: 'Reveal, verify and settle on Solana',
     items: [
-      'TEE reveals outcome with proof',
-      'Smart contract verifies commitment',
-      'Each bet evaluated against outcome',
-      'Winners paid from vault to wallet',
-      'Final state synced to Solana base'
+      'PER reveals the outcome alongside its attestation',
+      'Solana program verifies randomness, signature and commitment',
+      'Each bet is evaluated and payouts stream in SOL',
+      'Round state anchors back to the base layer ledger'
     ],
-    chips: ['Verify', 'Tossr Engine']
+    chips: ['Verifier', 'SOL Payouts']
   },
 ]
 
@@ -57,7 +56,7 @@ export function HowItWorksSection() {
   return (
     <Section id="how-it-works">
       <div className="container">
-        <SectionHeader title="How it works" sub="Provably fair betting powered by MagicBlock TEE and Solana" />
+        <SectionHeader title="How it works" sub="Provably fair betting powered by MagicBlock PER, VRF and Solana" />
         <div className="how-v3">
           <div className="process-rail">
             <div className="rail-line" aria-hidden />
@@ -91,7 +90,7 @@ export function HowItWorksSection() {
             ))}
           </div>
           <div className="flow-actions" style={{ justifyContent: 'center', marginTop: '1rem' }}>
-            <a href="https://docs.magicblock.gg/TrustedExecutionLayer/Overview" target="_blank" rel="noopener noreferrer" className="chip chip-accent">Learn about TEE</a>
+            <a href="https://docs.magicblock.gg/TrustedExecutionLayer/PrivateEphemeralRollups" target="_blank" rel="noopener noreferrer" className="chip chip-accent">Learn about PER</a>
             <a href="#markets" className="chip">Try it now</a>
           </div>
         </div>

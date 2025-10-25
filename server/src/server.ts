@@ -13,7 +13,6 @@ import { attestationsRoutes } from '@/features/attestations';
 import { streaksRoutes } from '@/features/streaks';
 import { communityRoutes } from '@/features/community';
 import { analyticsRoutes } from '@/features/analytics';
-import { teeServerRoutes } from '@/tee-server/routes';
 import { initializeJobs, shutdownJobs } from '@/jobs';
 
 async function bootstrap() {
@@ -47,8 +46,6 @@ async function bootstrap() {
     app.register(streaksRoutes, { prefix: '/api/v1/streaks' });
     app.register(communityRoutes, { prefix: '/api/v1/community' });
     app.register(analyticsRoutes, { prefix: '/api/v1/analytics' });
-    
-    app.register(teeServerRoutes, { prefix: '/tee' });
 
     await connectDatabase();
     await connectRedis();

@@ -1,14 +1,14 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Token, TokenAccount, Mint, TransferChecked};
+use anchor_lang::solana_program::secp256k1_recover::secp256k1_recover;
 use anchor_spl::associated_token::AssociatedToken;
+use anchor_spl::token::{self, Mint, Token, TokenAccount, TransferChecked};
 use ephemeral_rollups_sdk::anchor::{commit, delegate, ephemeral};
+use ephemeral_rollups_sdk::cpi::DelegateConfig;
+use ephemeral_rollups_sdk::ephem::{commit_accounts, commit_and_undelegate_accounts};
 use ephemeral_vrf_sdk::anchor::vrf;
 use ephemeral_vrf_sdk::instructions::{create_request_randomness_ix, RequestRandomnessParams};
 use ephemeral_vrf_sdk::types::SerializableAccountMeta;
-use ephemeral_rollups_sdk::cpi::DelegateConfig;
-use ephemeral_rollups_sdk::ephem::{commit_accounts, commit_and_undelegate_accounts};
-use sha2::{Sha256, Digest};
-use anchor_lang::solana_program::secp256k1_recover::secp256k1_recover;
+use sha2::{Digest, Sha256};
 
 declare_id!("5xmSvdzDsFY4bx5nyFiMpmq881Epcm7v3Dxsxw54gGcX");
 
@@ -26,15 +26,11 @@ const MIN_LOCK_DURATION: i64 = 5;
 const MAX_PREDICTING_DURATION: i64 = 300;
 
 const TEE_PUBKEY: [u8; 65] = [
-    0x04, 0x5d, 0x46, 0xd0, 0x70, 0x9c, 0x22, 0xee,
-    0x95, 0x23, 0x9e, 0x90, 0x3e, 0xc5, 0xfe, 0x49,
-    0x29, 0xc3, 0x21, 0x90, 0x8e, 0xa4, 0xa3, 0x57,
-    0x87, 0xd2, 0xa5, 0xcf, 0xda, 0x27, 0x5a, 0x51,
-    0x16, 0x45, 0x1f, 0x29, 0xb8, 0xcb, 0xff, 0xf2,
-    0xd5, 0x3f, 0x46, 0xe8, 0xf0, 0xe6, 0x71, 0x8c,
-    0x0d, 0xa8, 0x4e, 0x69, 0x56, 0xf6, 0xbe, 0xf9,
-    0x1f, 0xc9, 0xbc, 0x7f, 0x0a, 0x3e, 0xe9, 0xb4,
-    0x05
+    0x04, 0x5d, 0x46, 0xd0, 0x70, 0x9c, 0x22, 0xee, 0x95, 0x23, 0x9e, 0x90, 0x3e, 0xc5, 0xfe, 0x49,
+    0x29, 0xc3, 0x21, 0x90, 0x8e, 0xa4, 0xa3, 0x57, 0x87, 0xd2, 0xa5, 0xcf, 0xda, 0x27, 0x5a, 0x51,
+    0x16, 0x45, 0x1f, 0x29, 0xb8, 0xcb, 0xff, 0xf2, 0xd5, 0x3f, 0x46, 0xe8, 0xf0, 0xe6, 0x71, 0x8c,
+    0x0d, 0xa8, 0x4e, 0x69, 0x56, 0xf6, 0xbe, 0xf9, 0x1f, 0xc9, 0xbc, 0x7f, 0x0a, 0x3e, 0xe9, 0xb4,
+    0x05,
 ];
 
 #[ephemeral]
@@ -62,21 +58,25 @@ pub mod tossr_engine {
     }
 
     /// Request VRF randomness inside ER; callback will set outcome.
-    pub fn request_randomness(
-        ctx: Context<VrfRequestCtx>,
-        client_seed: u8,
-    ) -> Result<()> {
+    pub fn request_randomness(ctx: Context<VrfRequestCtx>, client_seed: u8) -> Result<()> {
         let ix = create_request_randomness_ix(RequestRandomnessParams {
             payer: ctx.accounts.payer.key(),
             oracle_queue: ctx.accounts.oracle_queue.key(),
             callback_program_id: ID,
             callback_discriminator: instruction::VrfCallback::DISCRIMINATOR.to_vec(),
             caller_seed: [client_seed; 32],
-            accounts_metas: Some(vec![SerializableAccountMeta {
-                pubkey: ctx.accounts.round.key(),
-                is_signer: false,
-                is_writable: true,
-            }, SerializableAccountMeta { pubkey: ctx.accounts.market.key(), is_signer: false, is_writable: false }]),
+            accounts_metas: Some(vec![
+                SerializableAccountMeta {
+                    pubkey: ctx.accounts.round.key(),
+                    is_signer: false,
+                    is_writable: true,
+                },
+                SerializableAccountMeta {
+                    pubkey: ctx.accounts.market.key(),
+                    is_signer: false,
+                    is_writable: false,
+                },
+            ]),
             ..Default::default()
         });
         ctx.accounts
@@ -85,29 +85,32 @@ pub mod tossr_engine {
     }
 
     /// VRF callback executed inside ER, sets the outcome based on randomness
-    pub fn vrf_callback(
-        ctx: Context<VrfCallbackCtx>,
-        randomness: [u8; 32],
-    ) -> Result<()> {
+    pub fn vrf_callback(ctx: Context<VrfCallbackCtx>, randomness: [u8; 32]) -> Result<()> {
         let round = &mut ctx.accounts.round;
-        require!(round.status == RoundStatus::Locked as u8, ErrorCode::InvalidState);
-
-        let mt = ctx.accounts.market.market_type;
-        let clock = Clock::get()?;
-        let outcome = derive_outcome_from_randomness(mt, &randomness);
-        round.outcome = outcome;
-        round.revealed_at = clock.unix_timestamp;
+        require!(
+            round.status == RoundStatus::Locked as u8,
+            ErrorCode::InvalidState
+        );
+        round.inputs_hash = randomness;
         Ok(())
     }
 
     pub fn toggle_market(ctx: Context<ToggleMarket>, is_active: bool) -> Result<()> {
-        require_keys_eq!(ctx.accounts.market.admin, ctx.accounts.admin.key(), ErrorCode::Unauthorized);
+        require_keys_eq!(
+            ctx.accounts.market.admin,
+            ctx.accounts.admin.key(),
+            ErrorCode::Unauthorized
+        );
         ctx.accounts.market.is_active = is_active;
         Ok(())
     }
 
     pub fn set_house_edge_bps(ctx: Context<SetHouseEdge>, house_edge_bps: u16) -> Result<()> {
-        require_keys_eq!(ctx.accounts.market.admin, ctx.accounts.admin.key(), ErrorCode::Unauthorized);
+        require_keys_eq!(
+            ctx.accounts.market.admin,
+            ctx.accounts.admin.key(),
+            ErrorCode::Unauthorized
+        );
         ctx.accounts.market.house_edge_bps = house_edge_bps;
         Ok(())
     }
@@ -115,7 +118,11 @@ pub mod tossr_engine {
     pub fn open_round(ctx: Context<OpenRound>) -> Result<()> {
         let market = &mut ctx.accounts.market;
         require!(market.is_active, ErrorCode::MarketInactive);
-        require_keys_eq!(market.admin, ctx.accounts.admin.key(), ErrorCode::Unauthorized);
+        require_keys_eq!(
+            market.admin,
+            ctx.accounts.admin.key(),
+            ErrorCode::Unauthorized
+        );
 
         let clock = Clock::get()?;
         let round = &mut ctx.accounts.round;
@@ -136,9 +143,16 @@ pub mod tossr_engine {
     }
 
     pub fn schedule_lock(ctx: Context<ScheduleLock>, lock_at: i64) -> Result<()> {
-        require_keys_eq!(ctx.accounts.market.admin, ctx.accounts.admin.key(), ErrorCode::Unauthorized);
+        require_keys_eq!(
+            ctx.accounts.market.admin,
+            ctx.accounts.admin.key(),
+            ErrorCode::Unauthorized
+        );
         let round = &mut ctx.accounts.round;
-        require!(round.status == RoundStatus::Predicting as u8, ErrorCode::InvalidState);
+        require!(
+            round.status == RoundStatus::Predicting as u8,
+            ErrorCode::InvalidState
+        );
 
         let clock = Clock::get()?;
         require!(lock_at > clock.unix_timestamp, ErrorCode::InvalidLockTime);
@@ -152,9 +166,16 @@ pub mod tossr_engine {
     }
 
     pub fn lock_round(ctx: Context<LockRound>) -> Result<()> {
-        require_keys_eq!(ctx.accounts.market.admin, ctx.accounts.admin.key(), ErrorCode::Unauthorized);
+        require_keys_eq!(
+            ctx.accounts.market.admin,
+            ctx.accounts.admin.key(),
+            ErrorCode::Unauthorized
+        );
         let round = &mut ctx.accounts.round;
-        require!(round.status == RoundStatus::Predicting as u8, ErrorCode::InvalidState);
+        require!(
+            round.status == RoundStatus::Predicting as u8,
+            ErrorCode::InvalidState
+        );
 
         let clock = Clock::get()?;
 
@@ -176,7 +197,10 @@ pub mod tossr_engine {
         attestation_sig: [u8; 64],
     ) -> Result<()> {
         let round = &mut ctx.accounts.round;
-        require!(round.status == RoundStatus::Locked as u8, ErrorCode::InvalidState);
+        require!(
+            round.status == RoundStatus::Locked as u8,
+            ErrorCode::InvalidState
+        );
 
         let clock = Clock::get()?;
         require!(
@@ -198,10 +222,17 @@ pub mod tossr_engine {
         attestation_sig: [u8; 64],
     ) -> Result<()> {
         let round = &mut ctx.accounts.round;
-        require!(round.status == RoundStatus::Locked as u8, ErrorCode::InvalidState);
+        require!(
+            round.status == RoundStatus::Locked as u8,
+            ErrorCode::InvalidState
+        );
         require!(round.commitment_hash.is_some(), ErrorCode::NoCommitment);
 
-        verify_commitment(&round.commitment_hash.unwrap(), &value.to_le_bytes(), &nonce)?;
+        verify_commitment(
+            &round.commitment_hash.unwrap(),
+            &value.to_le_bytes(),
+            &nonce,
+        )?;
         verify_attestation(&round.commitment_hash.unwrap(), &attestation_sig)?;
 
         let clock = Clock::get()?;
@@ -212,12 +243,12 @@ pub mod tossr_engine {
     }
 
     /// ER-only: Reveal numeric outcome inside Ephemeral Rollup
-    pub fn er_reveal_outcome_numeric(
-        ctx: Context<RevealOutcome>,
-        value: u16,
-    ) -> Result<()> {
+    pub fn er_reveal_outcome_numeric(ctx: Context<RevealOutcome>, value: u16) -> Result<()> {
         let round = &mut ctx.accounts.round;
-        require!(round.status == RoundStatus::Locked as u8, ErrorCode::InvalidState);
+        require!(
+            round.status == RoundStatus::Locked as u8,
+            ErrorCode::InvalidState
+        );
         let clock = Clock::get()?;
         round.outcome = OutcomeType::Numeric { value };
         round.revealed_at = clock.unix_timestamp;
@@ -234,7 +265,10 @@ pub mod tossr_engine {
         attestation_sig: [u8; 64],
     ) -> Result<()> {
         let round = &mut ctx.accounts.round;
-        require!(round.status == RoundStatus::Locked as u8, ErrorCode::InvalidState);
+        require!(
+            round.status == RoundStatus::Locked as u8,
+            ErrorCode::InvalidState
+        );
         require!(round.commitment_hash.is_some(), ErrorCode::NoCommitment);
 
         let outcome_bytes = [shape, color, size];
@@ -257,7 +291,10 @@ pub mod tossr_engine {
         size: u8,
     ) -> Result<()> {
         let round = &mut ctx.accounts.round;
-        require!(round.status == RoundStatus::Locked as u8, ErrorCode::InvalidState);
+        require!(
+            round.status == RoundStatus::Locked as u8,
+            ErrorCode::InvalidState
+        );
         let clock = Clock::get()?;
         round.outcome = OutcomeType::Shape { shape, color, size };
         round.revealed_at = clock.unix_timestamp;
@@ -273,7 +310,10 @@ pub mod tossr_engine {
         attestation_sig: [u8; 64],
     ) -> Result<()> {
         let round = &mut ctx.accounts.round;
-        require!(round.status == RoundStatus::Locked as u8, ErrorCode::InvalidState);
+        require!(
+            round.status == RoundStatus::Locked as u8,
+            ErrorCode::InvalidState
+        );
         require!(round.commitment_hash.is_some(), ErrorCode::NoCommitment);
 
         let mut outcome_bytes = vec![pattern_id];
@@ -284,7 +324,10 @@ pub mod tossr_engine {
 
         let clock = Clock::get()?;
         round.inputs_hash = inputs_hash;
-        round.outcome = OutcomeType::Pattern { pattern_id, matched_value };
+        round.outcome = OutcomeType::Pattern {
+            pattern_id,
+            matched_value,
+        };
         round.revealed_at = clock.unix_timestamp;
         Ok(())
     }
@@ -296,9 +339,15 @@ pub mod tossr_engine {
         matched_value: u16,
     ) -> Result<()> {
         let round = &mut ctx.accounts.round;
-        require!(round.status == RoundStatus::Locked as u8, ErrorCode::InvalidState);
+        require!(
+            round.status == RoundStatus::Locked as u8,
+            ErrorCode::InvalidState
+        );
         let clock = Clock::get()?;
-        round.outcome = OutcomeType::Pattern { pattern_id, matched_value };
+        round.outcome = OutcomeType::Pattern {
+            pattern_id,
+            matched_value,
+        };
         round.revealed_at = clock.unix_timestamp;
         Ok(())
     }
@@ -313,7 +362,10 @@ pub mod tossr_engine {
         attestation_sig: [u8; 64],
     ) -> Result<()> {
         let round = &mut ctx.accounts.round;
-        require!(round.status == RoundStatus::Locked as u8, ErrorCode::InvalidState);
+        require!(
+            round.status == RoundStatus::Locked as u8,
+            ErrorCode::InvalidState
+        );
         require!(round.commitment_hash.is_some(), ErrorCode::NoCommitment);
 
         let mut outcome_bytes = Vec::new();
@@ -345,10 +397,18 @@ pub mod tossr_engine {
         sensor_score: u16,
     ) -> Result<()> {
         let round = &mut ctx.accounts.round;
-        require!(round.status == RoundStatus::Locked as u8, ErrorCode::InvalidState);
+        require!(
+            round.status == RoundStatus::Locked as u8,
+            ErrorCode::InvalidState
+        );
         let winner = determine_entropy_winner(tee_score, chain_score, sensor_score);
         let clock = Clock::get()?;
-        round.outcome = OutcomeType::Entropy { tee_score, chain_score, sensor_score, winner };
+        round.outcome = OutcomeType::Entropy {
+            tee_score,
+            chain_score,
+            sensor_score,
+            winner,
+        };
         round.revealed_at = clock.unix_timestamp;
         Ok(())
     }
@@ -362,7 +422,10 @@ pub mod tossr_engine {
         attestation_sig: [u8; 64],
     ) -> Result<()> {
         let round = &mut ctx.accounts.round;
-        require!(round.status == RoundStatus::Locked as u8, ErrorCode::InvalidState);
+        require!(
+            round.status == RoundStatus::Locked as u8,
+            ErrorCode::InvalidState
+        );
         require!(round.commitment_hash.is_some(), ErrorCode::NoCommitment);
 
         let mut outcome_bytes = vec![final_byte];
@@ -373,7 +436,10 @@ pub mod tossr_engine {
 
         let clock = Clock::get()?;
         round.inputs_hash = inputs_hash;
-        round.outcome = OutcomeType::Community { final_byte, seed_hash };
+        round.outcome = OutcomeType::Community {
+            final_byte,
+            seed_hash,
+        };
         round.revealed_at = clock.unix_timestamp;
         Ok(())
     }
@@ -385,20 +451,25 @@ pub mod tossr_engine {
         seed_hash: [u8; 32],
     ) -> Result<()> {
         let round = &mut ctx.accounts.round;
-        require!(round.status == RoundStatus::Locked as u8, ErrorCode::InvalidState);
+        require!(
+            round.status == RoundStatus::Locked as u8,
+            ErrorCode::InvalidState
+        );
         let clock = Clock::get()?;
-        round.outcome = OutcomeType::Community { final_byte, seed_hash };
+        round.outcome = OutcomeType::Community {
+            final_byte,
+            seed_hash,
+        };
         round.revealed_at = clock.unix_timestamp;
         Ok(())
     }
 
-    pub fn place_bet(
-        ctx: Context<PlaceBet>,
-        selection: Selection,
-        stake: u64,
-    ) -> Result<()> {
+    pub fn place_bet(ctx: Context<PlaceBet>, selection: Selection, stake: u64) -> Result<()> {
         let round = &ctx.accounts.round;
-        require!(round.status == RoundStatus::Predicting as u8, ErrorCode::InvalidState);
+        require!(
+            round.status == RoundStatus::Predicting as u8,
+            ErrorCode::InvalidState
+        );
 
         let clock = Clock::get()?;
         if round.lock_scheduled_at > 0 {
@@ -412,7 +483,11 @@ pub mod tossr_engine {
 
         let odds_bps = compute_odds_bps(&selection, &ctx.accounts.market)?;
 
-        require_keys_eq!(ctx.accounts.market.mint, ctx.accounts.mint.key(), ErrorCode::Unauthorized);
+        require_keys_eq!(
+            ctx.accounts.market.mint,
+            ctx.accounts.mint.key(),
+            ErrorCode::Unauthorized
+        );
 
         let decimals = ctx.accounts.mint.decimals;
         let cpi_accounts = TransferChecked {
@@ -445,7 +520,11 @@ pub mod tossr_engine {
 
         ctx.accounts.delegate_pda(
             &ctx.accounts.payer,
-            &[ROUND_SEED, ctx.accounts.market.key().as_ref(), &ctx.accounts.round.number.to_le_bytes()],
+            &[
+                ROUND_SEED,
+                ctx.accounts.market.key().as_ref(),
+                &ctx.accounts.round.number.to_le_bytes(),
+            ],
             DelegateConfig {
                 validator,
                 ..Default::default()
@@ -476,7 +555,7 @@ pub mod tossr_engine {
 
     pub fn undelegate(ctx: Context<UndelegateRound>, pda_seeds: Vec<Vec<u8>>) -> Result<()> {
         use ephemeral_rollups_sdk::cpi::undelegate_account;
-        
+
         undelegate_account(
             &ctx.accounts.pda,
             ctx.program_id,
@@ -489,9 +568,16 @@ pub mod tossr_engine {
     }
 
     pub fn settle_round(ctx: Context<SettleRound>) -> Result<()> {
-        require_keys_eq!(ctx.accounts.market.admin, ctx.accounts.admin.key(), ErrorCode::Unauthorized);
+        require_keys_eq!(
+            ctx.accounts.market.admin,
+            ctx.accounts.admin.key(),
+            ErrorCode::Unauthorized
+        );
         let round = &mut ctx.accounts.round;
-        require!(round.status == RoundStatus::Locked as u8, ErrorCode::InvalidState);
+        require!(
+            round.status == RoundStatus::Locked as u8,
+            ErrorCode::InvalidState
+        );
         require!(round.revealed_at > 0, ErrorCode::OutcomeNotRevealed);
         require!(round.unsettled_bets == 0, ErrorCode::UnsettledBetsRemain);
         round.status = RoundStatus::Settled as u8;
@@ -500,9 +586,20 @@ pub mod tossr_engine {
 
     pub fn settle_bet(ctx: Context<SettleBet>) -> Result<()> {
         let round = &ctx.accounts.round;
-        require_keys_eq!(ctx.accounts.market.admin, ctx.accounts.admin.key(), ErrorCode::Unauthorized);
-        require_keys_eq!(ctx.accounts.market.mint, ctx.accounts.mint.key(), ErrorCode::Unauthorized);
-        require!(round.status == RoundStatus::Locked as u8, ErrorCode::InvalidState);
+        require_keys_eq!(
+            ctx.accounts.market.admin,
+            ctx.accounts.admin.key(),
+            ErrorCode::Unauthorized
+        );
+        require_keys_eq!(
+            ctx.accounts.market.mint,
+            ctx.accounts.mint.key(),
+            ErrorCode::Unauthorized
+        );
+        require!(
+            round.status == RoundStatus::Locked as u8,
+            ErrorCode::InvalidState
+        );
         require!(round.revealed_at > 0, ErrorCode::OutcomeNotRevealed);
 
         let bet = &mut ctx.accounts.bet;
@@ -512,7 +609,8 @@ pub mod tossr_engine {
 
         let mut payout_amount: u64 = 0;
         if won {
-            payout_amount = bet.stake
+            payout_amount = bet
+                .stake
                 .checked_mul(bet.odds_bps as u64)
                 .ok_or(ErrorCode::Overflow)?
                 / 100u64;
@@ -568,7 +666,10 @@ pub mod tossr_engine {
 
     pub fn update_streak(ctx: Context<UpdateStreak>, won: bool) -> Result<()> {
         let streak = &mut ctx.accounts.streak;
-        require!(streak.status == StreakStatus::Active as u8, ErrorCode::StreakNotActive);
+        require!(
+            streak.status == StreakStatus::Active as u8,
+            ErrorCode::StreakNotActive
+        );
 
         if won {
             streak.current_streak = streak.current_streak.saturating_add(1);
@@ -586,8 +687,15 @@ pub mod tossr_engine {
 
     pub fn claim_streak_reward(ctx: Context<ClaimStreakReward>) -> Result<()> {
         let streak = &ctx.accounts.streak;
-        require!(streak.status == StreakStatus::Completed as u8, ErrorCode::StreakNotCompleted);
-        require_keys_eq!(streak.user, ctx.accounts.user.key(), ErrorCode::Unauthorized);
+        require!(
+            streak.status == StreakStatus::Completed as u8,
+            ErrorCode::StreakNotCompleted
+        );
+        require_keys_eq!(
+            streak.user,
+            ctx.accounts.user.key(),
+            ErrorCode::Unauthorized
+        );
 
         let odds_bps = compute_streak_odds(streak.target)?;
         let base_stake = 100_000_000u64;
@@ -622,12 +730,12 @@ pub mod tossr_engine {
         Ok(())
     }
 
-    pub fn join_community_round(
-        ctx: Context<JoinCommunityRound>,
-        seed_byte: u8,
-    ) -> Result<()> {
+    pub fn join_community_round(ctx: Context<JoinCommunityRound>, seed_byte: u8) -> Result<()> {
         let round = &ctx.accounts.round;
-        require!(round.status == RoundStatus::Predicting as u8, ErrorCode::RoundNotPredicting);
+        require!(
+            round.status == RoundStatus::Predicting as u8,
+            ErrorCode::RoundNotPredicting
+        );
 
         let clock = Clock::get()?;
         if round.lock_scheduled_at > 0 {
@@ -721,10 +829,7 @@ pub mod tossr_engine {
         Ok(())
     }
 
-    pub fn contribute_to_jackpot(
-        ctx: Context<ContributeToJackpot>,
-        amount: u64,
-    ) -> Result<()> {
+    pub fn contribute_to_jackpot(ctx: Context<ContributeToJackpot>, amount: u64) -> Result<()> {
         require!(amount > 0, ErrorCode::InvalidStake);
 
         let decimals = ctx.accounts.mint.decimals;
@@ -785,7 +890,11 @@ pub mod tossr_engine {
         pattern_id: u8,
         pattern_type: PatternType,
     ) -> Result<()> {
-        require_keys_eq!(ctx.accounts.market.admin, ctx.accounts.admin.key(), ErrorCode::Unauthorized);
+        require_keys_eq!(
+            ctx.accounts.market.admin,
+            ctx.accounts.admin.key(),
+            ErrorCode::Unauthorized
+        );
 
         let config = &mut ctx.accounts.pattern_config;
         config.market = ctx.accounts.market.key();
@@ -800,7 +909,11 @@ pub mod tossr_engine {
         ctx: Context<CreateRoundPermissionGroup>,
         allowed_viewers: Vec<Pubkey>,
     ) -> Result<()> {
-        require_keys_eq!(ctx.accounts.market.admin, ctx.accounts.admin.key(), ErrorCode::Unauthorized);
+        require_keys_eq!(
+            ctx.accounts.market.admin,
+            ctx.accounts.admin.key(),
+            ErrorCode::Unauthorized
+        );
 
         let permission_group = &mut ctx.accounts.permission_group;
         permission_group.round = ctx.accounts.round.key();
@@ -814,11 +927,21 @@ pub mod tossr_engine {
         ctx: Context<UpdatePermissionGroup>,
         viewer: Pubkey,
     ) -> Result<()> {
-        require_keys_eq!(ctx.accounts.market.admin, ctx.accounts.admin.key(), ErrorCode::Unauthorized);
+        require_keys_eq!(
+            ctx.accounts.market.admin,
+            ctx.accounts.admin.key(),
+            ErrorCode::Unauthorized
+        );
 
         let permission_group = &mut ctx.accounts.permission_group;
-        require!(!permission_group.allowed_viewers.contains(&viewer), ErrorCode::ViewerAlreadyExists);
-        require!(permission_group.allowed_viewers.len() < 50, ErrorCode::MaxViewersReached);
+        require!(
+            !permission_group.allowed_viewers.contains(&viewer),
+            ErrorCode::ViewerAlreadyExists
+        );
+        require!(
+            permission_group.allowed_viewers.len() < 50,
+            ErrorCode::MaxViewersReached
+        );
 
         permission_group.allowed_viewers.push(viewer);
 
@@ -829,7 +952,11 @@ pub mod tossr_engine {
         ctx: Context<UpdatePermissionGroup>,
         viewer: Pubkey,
     ) -> Result<()> {
-        require_keys_eq!(ctx.accounts.market.admin, ctx.accounts.admin.key(), ErrorCode::Unauthorized);
+        require_keys_eq!(
+            ctx.accounts.market.admin,
+            ctx.accounts.admin.key(),
+            ErrorCode::Unauthorized
+        );
 
         let permission_group = &mut ctx.accounts.permission_group;
         permission_group.allowed_viewers.retain(|&v| v != viewer);
@@ -855,11 +982,28 @@ pub enum MarketType {
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq, Eq)]
 pub enum OutcomeType {
     Pending,
-    Numeric { value: u16 },
-    Shape { shape: u8, color: u8, size: u8 },
-    Pattern { pattern_id: u8, matched_value: u16 },
-    Entropy { tee_score: u16, chain_score: u16, sensor_score: u16, winner: u8 },
-    Community { final_byte: u8, seed_hash: [u8; 32] },
+    Numeric {
+        value: u16,
+    },
+    Shape {
+        shape: u8,
+        color: u8,
+        size: u8,
+    },
+    Pattern {
+        pattern_id: u8,
+        matched_value: u16,
+    },
+    Entropy {
+        tee_score: u16,
+        chain_score: u16,
+        sensor_score: u16,
+        winner: u8,
+    },
+    Community {
+        final_byte: u8,
+        seed_hash: [u8; 32],
+    },
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq)]
@@ -1593,8 +1737,12 @@ fn calculate_hamming_distance(byte1: u8, byte2: u8) -> u8 {
     xor.count_ones() as u8
 }
 
-fn u16_from(bytes: &[u8], idx: usize) -> u16 { u16::from_le_bytes([bytes[idx % 32], bytes[(idx+1) % 32]]) }
-fn u8_from(bytes: &[u8], idx: usize) -> u8 { bytes[idx % 32] }
+fn u16_from(bytes: &[u8], idx: usize) -> u16 {
+    u16::from_le_bytes([bytes[idx % 32], bytes[(idx + 1) % 32]])
+}
+fn u8_from(bytes: &[u8], idx: usize) -> u8 {
+    bytes[idx % 32]
+}
 
 fn derive_outcome_from_randomness(mt: MarketType, rnd: &[u8; 32]) -> OutcomeType {
     match mt {
@@ -1617,13 +1765,23 @@ fn derive_outcome_from_randomness(mt: MarketType, rnd: &[u8; 32]) -> OutcomeType
         MarketType::PatternOfDay => {
             let val = u16_from(rnd, 3) % 1000;
             let mut pid: u8 = 6;
-            if is_prime_u16(val) { pid = 0; }
-            else if is_fib_u16(val) { pid = 1; }
-            else if is_square_u16(val) { pid = 2; }
-            else if (val % 10) == 7 { pid = 3; }
-            else if is_pal_u16(val) { pid = 4; }
-            else if (val % 2) == 0 { pid = 5; }
-            OutcomeType::Pattern { pattern_id: pid, matched_value: val }
+            if is_prime_u16(val) {
+                pid = 0;
+            } else if is_fib_u16(val) {
+                pid = 1;
+            } else if is_square_u16(val) {
+                pid = 2;
+            } else if (val % 10) == 7 {
+                pid = 3;
+            } else if is_pal_u16(val) {
+                pid = 4;
+            } else if (val % 2) == 0 {
+                pid = 5;
+            }
+            OutcomeType::Pattern {
+                pattern_id: pid,
+                matched_value: val,
+            }
         }
         MarketType::ShapeColor => {
             let shape = u8_from(rnd, 4) % 4;
@@ -1640,7 +1798,12 @@ fn derive_outcome_from_randomness(mt: MarketType, rnd: &[u8; 32]) -> OutcomeType
             let chain = (u16_from(rnd, 10) % 512) + 1;
             let sensor = (u16_from(rnd, 12) % 512) + 1;
             let winner = determine_entropy_winner(tee, chain, sensor);
-            OutcomeType::Entropy { tee_score: tee, chain_score: chain, sensor_score: sensor, winner }
+            OutcomeType::Entropy {
+                tee_score: tee,
+                chain_score: chain,
+                sensor_score: sensor,
+                winner,
+            }
         }
         MarketType::StreakMeter => {
             let v = (u8_from(rnd, 14) % 100) as u16;
@@ -1648,28 +1811,49 @@ fn derive_outcome_from_randomness(mt: MarketType, rnd: &[u8; 32]) -> OutcomeType
         }
         MarketType::CommunitySeed => {
             let final_byte = u8_from(rnd, 15);
-            let mut sh = [0u8; 32]; sh.copy_from_slice(rnd);
-            OutcomeType::Community { final_byte, seed_hash: sh }
+            let mut sh = [0u8; 32];
+            sh.copy_from_slice(rnd);
+            OutcomeType::Community {
+                final_byte,
+                seed_hash: sh,
+            }
         }
     }
 }
 
 fn is_prime_u16(n: u16) -> bool {
-    if n < 2 { return false; }
-    if n == 2 { return true; }
-    if n % 2 == 0 { return false; }
+    if n < 2 {
+        return false;
+    }
+    if n == 2 {
+        return true;
+    }
+    if n % 2 == 0 {
+        return false;
+    }
     let mut i = 3u16;
     while (i as u32) * (i as u32) <= (n as u32) {
-        if n % i == 0 { return false; }
+        if n % i == 0 {
+            return false;
+        }
         i += 2;
     }
     true
 }
-fn is_square_u16(n: u16) -> bool { let r = (n as f64).sqrt() as u16; r*r == n }
-fn is_pal_u16(n: u16) -> bool { let s = itoa::Buffer::new().format(n).to_string(); s.chars().rev().collect::<String>() == s }
+fn is_square_u16(n: u16) -> bool {
+    let r = (n as f64).sqrt() as u16;
+    r * r == n
+}
+fn is_pal_u16(n: u16) -> bool {
+    let s = itoa::Buffer::new().format(n).to_string();
+    s.chars().rev().collect::<String>() == s
+}
 fn is_fib_u16(n: u16) -> bool {
     // quick check from precomputed small fibs up to 987
-    matches!(n, 0|1|2|3|5|8|13|21|34|55|89|144|233|377|610|987)
+    matches!(
+        n,
+        0 | 1 | 2 | 3 | 5 | 8 | 13 | 21 | 34 | 55 | 89 | 144 | 233 | 377 | 610 | 987
+    )
 }
 
 fn compute_streak_odds(target: u16) -> Result<u16> {
@@ -1707,7 +1891,9 @@ fn compute_odds_bps(sel: &Selection, market: &Market) -> Result<u16> {
 
     // helper: from probability p = num/den -> odds_pct
     let from_probability = |num: u64, den: u64| -> u16 {
-        if num == 0 || den == 0 { return 0; }
+        if num == 0 || den == 0 {
+            return 0;
+        }
         // M*100 = (1/p) * 100 / (1 + edge) = (den/num) * 100 * (10000/denom)
         let m_x100 = den
             .saturating_mul(100)
@@ -1722,23 +1908,21 @@ fn compute_odds_bps(sel: &Selection, market: &Market) -> Result<u16> {
             // 2 bins
             Ok(from_equal_bins(2))
         }
-        MarketType::ModuloThree => {
-            Ok(from_equal_bins(3))
-        }
-        MarketType::LastDigit => {
-            Ok(from_equal_bins(10))
-        }
-        MarketType::Jackpot => {
-            Ok(from_equal_bins(100))
-        }
-        MarketType::EntropyBattle => {
-            Ok(from_equal_bins(3))
-        }
+        MarketType::ModuloThree => Ok(from_equal_bins(3)),
+        MarketType::LastDigit => Ok(from_equal_bins(10)),
+        MarketType::Jackpot => Ok(from_equal_bins(100)),
+        MarketType::EntropyBattle => Ok(from_equal_bins(3)),
         MarketType::PickRange => {
             match sel.kind {
                 x if x == SelectionKind::Range as u8 => {
-                    let width: u64 = if sel.b >= sel.a { (sel.b - sel.a + 1) as u64 } else { 0 };
-                    if width == 0 { return Ok(0); }
+                    let width: u64 = if sel.b >= sel.a {
+                        (sel.b - sel.a + 1) as u64
+                    } else {
+                        0
+                    };
+                    if width == 0 {
+                        return Ok(0);
+                    }
                     if 100 % width == 0 {
                         let n = 100u64 / width; // equal partitions
                         Ok(from_equal_bins(n))
@@ -1747,9 +1931,7 @@ fn compute_odds_bps(sel: &Selection, market: &Market) -> Result<u16> {
                         Ok(from_probability(width, 100))
                     }
                 }
-                x if x == SelectionKind::Single as u8 => {
-                    Ok(from_equal_bins(100))
-                }
+                x if x == SelectionKind::Single as u8 => Ok(from_equal_bins(100)),
                 _ => Ok(from_equal_bins(2)),
             }
         }
@@ -1757,7 +1939,7 @@ fn compute_odds_bps(sel: &Selection, market: &Market) -> Result<u16> {
             // Total combos = 4 * 6 * 3 = 72
             let shapes = if sel.a == 255 { 4 } else { 1 };
             let colors = if sel.b == 255 { 6 } else { 1 };
-            let sizes  = if sel.c == 255 { 3 } else { 1 };
+            let sizes = if sel.c == 255 { 3 } else { 1 };
             let matched: u64 = (shapes * colors * sizes) as u64;
             let total: u64 = 72;
             Ok(from_probability(matched, total))
@@ -1768,7 +1950,11 @@ fn compute_odds_bps(sel: &Selection, market: &Market) -> Result<u16> {
             let counts: [u64; 7] = [168, 10, 29, 52, 73, 437, 231];
             let pid = sel.a as usize;
             let total: u64 = 1000;
-            let p_num = if pid < counts.len() { counts[pid] } else { counts[6] };
+            let p_num = if pid < counts.len() {
+                counts[pid]
+            } else {
+                counts[6]
+            };
             Ok(from_probability(p_num, total))
         }
         MarketType::CommunitySeed => {
@@ -1789,8 +1975,12 @@ fn compute_odds_bps(sel: &Selection, market: &Market) -> Result<u16> {
 }
 
 fn n_choose_k(n: u32, k: u32) -> u32 {
-    if k > n { return 0; }
-    if k == 0 || k == n { return 1; }
+    if k > n {
+        return 0;
+    }
+    if k == 0 || k == n {
+        return 1;
+    }
     let mut k = k.min(n - k);
     let mut numer: u64 = 1;
     let mut denom: u64 = 1;
@@ -1823,12 +2013,15 @@ fn evaluate_winner(sel: &Selection, outcome: &OutcomeType) -> Result<bool> {
             if sel.kind != SelectionKind::Shape as u8 {
                 return Ok(false);
             }
-            let matches = (sel.a == 255 || sel.a == *shape as u16) &&
-                         (sel.b == 255 || sel.b == *color as u16) &&
-                         (sel.c == 255 || sel.c == *size as u16);
+            let matches = (sel.a == 255 || sel.a == *shape as u16)
+                && (sel.b == 255 || sel.b == *color as u16)
+                && (sel.c == 255 || sel.c == *size as u16);
             Ok(matches)
         }
-        OutcomeType::Pattern { pattern_id, matched_value } => {
+        OutcomeType::Pattern {
+            pattern_id,
+            matched_value,
+        } => {
             if sel.kind != SelectionKind::Pattern as u8 {
                 return Ok(false);
             }
@@ -1872,7 +2065,9 @@ fn is_prime(n: u16) -> bool {
 }
 
 fn is_fibonacci(n: u16) -> bool {
-    let fibs: [u16; 17] = [0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987];
+    let fibs: [u16; 17] = [
+        0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987,
+    ];
     fibs.contains(&n)
 }
 

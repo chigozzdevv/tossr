@@ -24,18 +24,18 @@ export function LandingPage() {
         <SectionDivider />
         <Section id="get-started">
           <div className="container" style={{ textAlign: 'center', padding: '4rem 0' }}>
-            <h2 className="section-title" style={{ fontSize: '2rem', marginBottom: '1rem' }}>
-              Ready to experience provably fair betting?
+            <h2 className="section-title" style={{ fontSize: '2.2rem', marginBottom: '1rem' }}>
+              Ready to bet on attested randomness?
             </h2>
-            <p className="section-sub" style={{ maxWidth: '600px', margin: '0 auto 2rem', fontSize: '1.05rem' }}>
-              Connect your wallet and start betting on verifiable outcomes powered by MagicBlock TEE and Solana.
+            <p className="section-sub" style={{ maxWidth: '560px', margin: '0 auto 2rem', fontSize: '1.05rem' }}>
+              Launch Tossr, connect your wallet, and play SOL markets secured by MagicBlock PER + VRF proofs.
             </p>
-            <div className="row row-center" style={{ marginTop: '2rem', gap: '1rem' }}>
-              <Button variant="primary" style={{ padding: '0.9rem 2rem', fontSize: '1rem' }}>
+            <div className="row row-center" style={{ marginTop: '2.25rem', gap: '1rem' }}>
+              <Button variant="primary" style={{ padding: '0.95rem 2.4rem', fontSize: '1rem' }}>
                 Connect Wallet
               </Button>
-              <a className="btn" href="#how-it-works" style={{ padding: '0.9rem 2rem' }}>
-                Learn More
+              <a className="btn" href="#markets" style={{ padding: '0.95rem 2.4rem' }}>
+                Explore Markets
               </a>
             </div>
           </div>
@@ -44,104 +44,32 @@ export function LandingPage() {
       <footer style={{
         borderTop: '1px solid var(--border)',
         background: 'var(--surface)',
-        marginTop: '2rem'
+        marginTop: '3rem'
       }}>
         <div className="container" style={{
-          padding: '3rem 0 2rem',
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
-          gap: '2rem'
-        }}>
-          <div>
-            <h3 style={{
-              margin: '0 0 1rem 0',
-              fontSize: '1.2rem',
-              fontWeight: 900,
-              letterSpacing: '0.01em'
-            }}>
-              Tossr
-            </h3>
-            <p style={{
-              margin: 0,
-              fontSize: '0.9rem',
-              color: 'var(--muted)',
-              lineHeight: 1.6
-            }}>
-              Provably fair betting powered by MagicBlock TEE and Solana
-            </p>
-          </div>
-
-          <div>
-            <h4 style={{
-              margin: '0 0 1rem 0',
-              fontSize: '0.85rem',
-              fontWeight: 700,
-              textTransform: 'uppercase',
-              letterSpacing: '0.05em',
-              color: 'var(--muted)'
-            }}>
-              Product
-            </h4>
-            <nav style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-              <a href="#markets" style={{ color: 'var(--text)', fontSize: '0.9rem' }}>Markets</a>
-              <a href="#how-it-works" style={{ color: 'var(--text)', fontSize: '0.9rem' }}>How it Works</a>
-              <a href="#live-rounds" style={{ color: 'var(--text)', fontSize: '0.9rem' }}>Live Rounds</a>
-              <a href="#faq" style={{ color: 'var(--text)', fontSize: '0.9rem' }}>FAQ</a>
-            </nav>
-          </div>
-
-          <div>
-            <h4 style={{
-              margin: '0 0 1rem 0',
-              fontSize: '0.85rem',
-              fontWeight: 700,
-              textTransform: 'uppercase',
-              letterSpacing: '0.05em',
-              color: 'var(--muted)'
-            }}>
-              Resources
-            </h4>
-            <nav style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-              <a href="https://docs.tossr.io" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--text)', fontSize: '0.9rem' }}>Documentation</a>
-              <a href="https://docs.magicblock.gg/TrustedExecutionLayer/Overview" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--text)', fontSize: '0.9rem' }}>TEE Verification</a>
-              <a href="https://github.com/tossr" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--text)', fontSize: '0.9rem' }}>GitHub</a>
-            </nav>
-          </div>
-
-          <div>
-            <h4 style={{
-              margin: '0 0 1rem 0',
-              fontSize: '0.85rem',
-              fontWeight: 700,
-              textTransform: 'uppercase',
-              letterSpacing: '0.05em',
-              color: 'var(--muted)'
-            }}>
-              Community
-            </h4>
-            <nav style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-              <a href="https://twitter.com/tossr" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--text)', fontSize: '0.9rem' }}>Twitter</a>
-              <a href="https://discord.gg/tossr" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--text)', fontSize: '0.9rem' }}>Discord</a>
-              <a href="https://t.me/tossr" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--text)', fontSize: '0.9rem' }}>Telegram</a>
-            </nav>
-          </div>
-        </div>
-
-        <div className="container" style={{
-          padding: '2rem 0',
-          borderTop: '1px solid var(--border)',
+          padding: '2.5rem 0',
           display: 'flex',
+          flexWrap: 'wrap',
           justifyContent: 'space-between',
           alignItems: 'center',
-          flexWrap: 'wrap',
-          gap: '1rem'
+          gap: '1.5rem'
         }}>
-          <small style={{ color: 'var(--muted)' }}>
-            © {new Date().getFullYear()} Tossr. All rights reserved.
-          </small>
-          <div style={{ display: 'flex', gap: '1.5rem' }}>
-            <a href="/terms" style={{ color: 'var(--muted)', fontSize: '0.85rem' }}>Terms</a>
-            <a href="/privacy" style={{ color: 'var(--muted)', fontSize: '0.85rem' }}>Privacy</a>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+            <img src="/logo-tossr.svg" alt="Tossr" style={{ height: '28px', width: '28px' }} />
+            <div>
+              <strong style={{ fontSize: '1rem', letterSpacing: '0.02em' }}>tossr</strong>
+              <div style={{ fontSize: '0.8rem', color: 'var(--muted)' }}>MagicBlock PER + VRF on Solana</div>
+            </div>
+          </div>
+          <nav style={{ display: 'flex', gap: '1.25rem', flexWrap: 'wrap', fontSize: '0.85rem' }}>
+            <a href="#how-it-works" style={{ color: 'var(--muted)' }}>How it works</a>
+            <a href="#markets" style={{ color: 'var(--muted)' }}>Markets</a>
+            <a href="#live-rounds" style={{ color: 'var(--muted)' }}>Rounds</a>
+            <a href="#faq" style={{ color: 'var(--muted)' }}>FAQ</a>
+          </nav>
+          <div style={{ display: 'flex', gap: '1rem', fontSize: '0.85rem' }}>
+            <a href="/terms" style={{ color: 'var(--muted)' }}>Terms</a>
+            <a href="/privacy" style={{ color: 'var(--muted)' }}>Privacy</a>
           </div>
         </div>
       </footer>

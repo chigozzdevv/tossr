@@ -238,6 +238,7 @@ export function LiveRoundsSection() {
   const displayEntries = useMemo(() => {
     return activeRounds
       .map(({ round, timeLeftSeconds }) => ({ round, timeLeftSeconds }))
+      .filter(({ round }) => Boolean(round && round.market && round.market.name))
       .slice(0, 8)
   }, [activeRounds])
 
@@ -282,16 +283,14 @@ export function LiveRoundsSection() {
           sub="Queue up for upcoming releases or jump into active rounds"
         />
 
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
-          gap: '1rem',
-          marginTop: '1.25rem'
-        }}>
+        <div style={{ display: 'flex', justifyContent: 'center', marginTop: '1.25rem' }}>
           <div style={{
             border: '1px solid var(--border)',
             borderRadius: '12px',
-            padding: '1rem',
+            padding: '1rem 1.25rem',
+            maxWidth: '280px',
+            width: '100%',
+            textAlign: 'center',
             background: 'color-mix(in oklab, var(--accent) 4%, transparent)'
           }}>
             <span style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: 'var(--muted)', fontWeight: 600 }}>
@@ -310,12 +309,15 @@ export function LiveRoundsSection() {
         )}
 
         {displayEntries.length > 0 && (
-          <div style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
-            gap: '1.5rem',
-            marginTop: '1.5rem'
-          }}>
+          <div
+            className="live-round-grid"
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
+              gap: '1.5rem',
+              marginTop: '1.5rem'
+            }}
+          >
             {displayEntries.map((entry, idx) => {
               const { round } = entry
               const indicatorLabel = 'Ends in'

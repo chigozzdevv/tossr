@@ -1,10 +1,10 @@
-import { Connection } from '@solana/web3.js';
+import { Connection, PublicKey } from '@solana/web3.js';
+import nacl from 'tweetnacl';
 import { config } from '@/config/env';
 import { logger } from '@/utils/logger';
 import { mapServerToTeeMarketType } from '@/utils/market-type-mapper';
-import { createHash, randomBytes } from 'crypto';
-import { createRequire } from 'module';
-import { readFile } from 'fs/promises';
+import { createHash } from 'crypto';
+import { getAdminKeypair } from '@/config/admin-keypair';
 
 interface TeeAttestation {
   round_id: string;
@@ -23,43 +23,75 @@ export class TeeService {
   private teeRpcUrl: string;
   private connection: Connection;
   private integrityOkAt?: number;
+  private authToken?: string;
+  private authTokenExpiresAt?: number;
+  private readonly adminKeypair = getAdminKeypair();
+  private readonly adminPublicKey = new PublicKey(this.adminKeypair.publicKey);
 
   constructor() {
     this.teeRpcUrl = (config.TEE_RPC_URL || '').replace(/\/+$/, '');
     this.connection = new Connection(config.SOLANA_RPC_URL);
   }
 
-  private async verifyTeeRpcIntegrityNode(rpcUrl: string): Promise<boolean> {
-    const challengeBytes = randomBytes(32);
-    const challenge = challengeBytes.toString('base64');
-    const url = `${rpcUrl}/quote?challenge=${encodeURIComponent(challenge)}`;
-    const response = await fetch(url);
-    const body: unknown = await response.json();
-    const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null;
-    if (response.status !== 200) {
-      const msg = isObj(body) && typeof body.error === 'string' ? (body.error as string) : `HTTP ${response.status}`;
-      throw new Error(msg || 'Failed to get quote');
+  private async ensureIntegrity() {
+    if (!config.TEE_INTEGRITY_REQUIRED) {
+      return;
     }
-    if (!isObj(body) || typeof body.quote !== 'string') {
-      throw new Error('Invalid quote response');
+    const now = Date.now();
+    if (this.integrityOkAt && now - this.integrityOkAt < config.ATTESTATION_CACHE_TTL * 1000) {
+      return;
     }
+    const { verifyTeeRpcIntegrity } = await import('@magicblock-labs/ephemeral-rollups-sdk/lib/privacy/verify.js');
+    const ok = await verifyTeeRpcIntegrity(this.teeRpcUrl);
+    if (!ok) {
+      throw new Error('TEE integrity verification failed');
+    }
+    this.integrityOkAt = now;
+  }
 
-    const { default: init, js_get_collateral, js_verify } = await import('@phala/dcap-qvl-web');
-    const require = createRequire(import.meta.url);
-    const wasmPath = require.resolve('@phala/dcap-qvl-web/dcap-qvl-web_bg.wasm');
-    const wasmBytes = await readFile(wasmPath);
-    await init(wasmBytes);
-
-    const rawQuote = Uint8Array.from(Buffer.from(body.quote as string, 'base64'));
-    const pccsUrl = 'https://pccs.phala.network/tdx/certification/v4';
-    const quoteCollateral = await js_get_collateral(pccsUrl, rawQuote);
-    const now = BigInt(Math.floor(Date.now() / 1000));
+  private decodeExpiry(token: string, fallback: number) {
+    const parts = token.split('.');
+    if (parts.length !== 3) {
+      return fallback;
+    }
     try {
-      js_verify(rawQuote, quoteCollateral, now);
-      return true;
-    } catch {
-      return false;
+      const [, payloadBase64] = parts;
+      if (!payloadBase64) {
+        return fallback;
+      }
+      const raw = Buffer.from(payloadBase64, 'base64url').toString('utf8');
+      const payload = JSON.parse(raw) as { exp?: number };
+      if (payload.exp) {
+        return Math.max(Date.now() + 1000, payload.exp * 1000 - 5000);
+      }
+    } catch {}
+    return fallback;
+  }
+
+  private async ensureAuthToken(): Promise<string> {
+    const ttlMs = config.TEE_AUTH_CACHE_TTL * 1000;
+    const now = Date.now();
+    if (this.authToken && this.authTokenExpiresAt && now < this.authTokenExpiresAt) {
+      return this.authToken;
     }
+    const { getAuthToken } = await import('@magicblock-labs/ephemeral-rollups-sdk/lib/privacy/auth.js');
+    const token = await getAuthToken(
+      this.teeRpcUrl,
+      this.adminPublicKey,
+      async (message: Uint8Array) => nacl.sign.detached(message, this.adminKeypair.secretKey)
+    );
+    this.authToken = token;
+    this.authTokenExpiresAt = this.decodeExpiry(token, now + ttlMs);
+    return token;
+  }
+
+  private async buildUrl(path: string, authorize = true): Promise<string> {
+    const base = new URL(path, `${this.teeRpcUrl}/`);
+    if (authorize) {
+      const token = await this.ensureAuthToken();
+      base.searchParams.set('token', token);
+    }
+    return base.toString();
   }
 
   async generateOutcome(
@@ -68,25 +100,18 @@ export class TeeService {
     params: {
       chainHash?: Uint8Array;
       communitySeeds?: number[];
+      vrfRandomness?: Uint8Array;
     } = {}
   ): Promise<TeeAttestation> {
     try {
-      if (config.TEE_INTEGRITY_REQUIRED) {
-        const now = Date.now();
-        if (!this.integrityOkAt || now - this.integrityOkAt > 10 * 60 * 1000) {
-          const ok = await this.verifyTeeRpcIntegrityNode(this.teeRpcUrl);
-          if (!ok) {
-            throw new Error('TEE integrity verification failed');
-          }
-          this.integrityOkAt = now;
-        }
-      }
+      await this.ensureIntegrity();
+      const endpoint = await this.buildUrl('/generate_outcome');
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 30000);
 
       const teeMarketType = mapServerToTeeMarketType(marketType as any);
 
-      const response = await fetch(`${this.teeRpcUrl}/generate_outcome`, {
+      const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -95,6 +120,7 @@ export class TeeService {
           params: {
             chain_hash: params.chainHash ? Array.from(params.chainHash) : null,
             community_seeds: params.communitySeeds || null,
+            vrf_randomness: params.vrfRandomness ? Array.from(params.vrfRandomness) : null,
           },
         }),
         signal: controller.signal,
@@ -120,10 +146,12 @@ export class TeeService {
     target: number
   ): Promise<{ new_streak: number }> {
     try {
+      await this.ensureIntegrity();
+      const endpoint = await this.buildUrl('/update_streak');
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 10000);
 
-      const response = await fetch(`${this.teeRpcUrl}/update_streak`, {
+      const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -150,10 +178,12 @@ export class TeeService {
 
   async getStreakState(wallet: string): Promise<{ streak: number }> {
     try {
+      await this.ensureIntegrity();
+      const endpoint = await this.buildUrl(`/get_streak/${wallet}`);
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 5000);
 
-      const response = await fetch(`${this.teeRpcUrl}/get_streak/${wallet}`, {
+      const response = await fetch(endpoint, {
         method: 'GET',
         signal: controller.signal,
       });
