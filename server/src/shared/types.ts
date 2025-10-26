@@ -1,8 +1,14 @@
 import { z } from 'zod';
-import { RoundStatus as PrismaRoundStatus } from '@prisma/client';
 
-export const RoundStatus = PrismaRoundStatus;
-export type RoundStatus = PrismaRoundStatus;
+export enum RoundStatus {
+  QUEUED = 'QUEUED',
+  PREDICTING = 'PREDICTING',
+  LOCKED = 'LOCKED',
+  REVEALED = 'REVEALED',
+  SETTLED = 'SETTLED',
+  FAILED = 'FAILED',
+}
+export type RoundStatusType = `${RoundStatus}`;
 
 // Common response types
 export interface ApiResponse<T = any> {

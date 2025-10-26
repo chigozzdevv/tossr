@@ -1,4 +1,4 @@
-import { db } from '@/config/database';
+import { Round, CommunitySeed, User } from '@/config/database';
 import { redis } from '@/config/redis';
 import { RoundStatus } from '@/shared/types';
 import { NotFoundError, ValidationError, ConflictError } from '@/shared/errors';
@@ -13,10 +13,7 @@ export class CommunityService {
       throw new ValidationError('Byte must be between 0 and 255');
     }
 
-    const round = await db.round.findUnique({
-      where: { id: roundId },
-      include: { market: true },
-    });
+    const round = await Round.findById(roundId).populate({ path: 'marketId', model: 'Market' }).lean();
 
     if (!round) {
       throw new NotFoundError('Round');
@@ -26,30 +23,14 @@ export class CommunityService {
       throw new ConflictError('Round is no longer accepting community seeds');
     }
 
-    // Check if user already joined this round
-    const existingSeed = await db.communitySeed.findUnique({
-      where: {
-        userId_roundId: {
-          userId,
-          roundId,
-        },
-      },
-    });
+    const existingSeed = await CommunitySeed.findOne({ userId, roundId }).lean();
 
     if (existingSeed) {
       throw new ConflictError('User already joined this community round');
     }
 
-    // Add community seed
-    const communitySeed = await db.communitySeed.create({
-      data: {
-        userId,
-        roundId,
-        byte,
-      },
-    });
+    const communitySeed = await CommunitySeed.create({ userId, roundId, byte });
 
-    // Cache in Redis for real-time access
     await redis.hset(
       redisKeys.communityRound(roundId),
       userId,
@@ -59,7 +40,6 @@ export class CommunityService {
       })
     );
 
-    // Increment participant count
     await redis.incr(redisKeys.communityCount(roundId));
 
     logger.info(`User joined community round: ${userId} - Round: ${roundId} - Byte: ${byte}`);
@@ -68,10 +48,7 @@ export class CommunityService {
   }
 
   async finalizeCommunityRound(roundId: string) {
-    const seeds = await db.communitySeed.findMany({
-      where: { roundId },
-      orderBy: { createdAt: 'asc' },
-    });
+    const seeds = await CommunitySeed.find({ roundId }).sort({ createdAt: 1 }).lean();
 
     if (seeds.length === 0) {
       throw new ValidationError('No community seeds found for this round');
@@ -89,13 +66,10 @@ export class CommunityService {
     const finalHash = Buffer.from(seed_hash).toString('hex');
 
     const seededWithDistance = await Promise.all(
-      seeds.map(async (seed: { id: string; byte: number; userId: string; roundId: string; createdAt: Date }) => {
+      seeds.map(async (seed: any) => {
         const distance = this.calculateHammingDistance(seed.byte, finalByte);
 
-        await db.communitySeed.update({
-          where: { id: seed.id },
-          data: { distance, won: distance === 0 },
-        });
+        await CommunitySeed.updateOne({ _id: seed._id }, { $set: { distance, won: distance === 0 } });
 
         return {
           ...seed,
@@ -145,18 +119,10 @@ export class CommunityService {
   }
 
   async getCommunityRoundParticipants(roundId: string) {
-    const seeds = await db.communitySeed.findMany({
-      where: { roundId },
-      include: {
-        user: {
-          select: {
-            id: true,
-            walletAddress: true,
-          },
-        },
-      },
-      orderBy: { createdAt: 'asc' },
-    });
+    const seeds = await CommunitySeed.find({ roundId })
+      .populate({ path: 'userId', select: 'id walletAddress', model: 'User' })
+      .sort({ createdAt: 1 })
+      .lean();
 
     const total = seeds.length;
     const minByte = Math.min(...seeds.map((s: { byte: number }) => s.byte));
@@ -178,29 +144,13 @@ export class CommunityService {
     const { page = 1, limit = 20 } = options;
 
     const [seeds, total] = await Promise.all([
-      db.communitySeed.findMany({
-        where: { userId },
-        include: {
-          round: {
-            select: {
-              id: true,
-              roundNumber: true,
-              status: true,
-              settledAt: true,
-              market: {
-                select: {
-                  name: true,
-                  type: true,
-                },
-              },
-            },
-          },
-        },
-        orderBy: { createdAt: 'desc' },
-        skip: (page - 1) * limit,
-        take: limit,
-      }),
-      db.communitySeed.count({ where: { userId } }),
+      CommunitySeed.find({ userId })
+        .populate({ path: 'roundId', select: 'roundNumber status settledAt marketId', populate: { path: 'marketId', select: 'name type' }, model: 'Round' })
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      CommunitySeed.countDocuments({ userId }),
     ]);
 
     return {
@@ -216,24 +166,11 @@ export class CommunityService {
   async getCommunityStats(userId?: string) {
     const userFilter = userId ? { userId } : {};
 
-    const [
-      totalParticipations,
-      totalWins,
-      totalRounds,
-      avgDistance,
-    ] = await Promise.all([
-      db.communitySeed.count({ where: userFilter }),
-      db.communitySeed.count({ where: { ...userFilter, won: true } }),
-      db.round.count({
-        where: {
-          status: RoundStatus.SETTLED,
-          communitySeeds: { some: userFilter },
-        },
-      }),
-      db.communitySeed.aggregate({
-        where: { ...userFilter, distance: { not: null } },
-        _avg: { distance: true },
-      }),
+    const [ totalParticipations, totalWins, totalRounds, avg ] = await Promise.all([
+      CommunitySeed.countDocuments(userFilter),
+      CommunitySeed.countDocuments({ ...userFilter, won: true }),
+      Round.countDocuments({ status: RoundStatus.SETTLED }),
+      CommunitySeed.aggregate([{ $match: { ...userFilter, distance: { $ne: null } } }, { $group: { _id: null, avg: { $avg: '$distance' } } }]),
     ]);
 
     const winRate = totalParticipations > 0 ? (totalWins / totalParticipations) * 100 : 0;
@@ -243,49 +180,26 @@ export class CommunityService {
       totalWins,
       totalRounds,
       winRate: Math.round(winRate * 100) / 100,
-      avgDistance: avgDistance._avg.distance ? 
-        Math.round((avgDistance._avg.distance || 0) * 100) / 100 : 0,
+      avgDistance: avg?.[0]?.avg ? Math.round((avg?.[0]?.avg || 0) * 100) / 100 : 0,
     };
   }
 
   async getCommunityLeaderboard(limit: number = 50) {
-    // Get win statistics for all users
-    const winStats = await db.communitySeed.groupBy({
-      by: ['userId'],
-      where: { won: true },
-      _count: { won: true },
-      orderBy: {
-        _count: { won: 'desc' },
-      },
-      take: limit,
-    });
+    const winStats = await CommunitySeed.aggregate([
+      { $match: { won: true } },
+      { $group: { _id: '$userId', totalWins: { $sum: 1 } } },
+      { $sort: { totalWins: -1 } },
+      { $limit: limit },
+    ]);
 
-    // Get full user details
-    const leaderboard = await Promise.all(
-      winStats.map(async (stat: { userId: string; _count: { won: number } }, index: number) => {
-        const user = await db.user.findUnique({
-          where: { id: stat.userId },
-          select: {
-            id: true,
-            walletAddress: true,
-          },
-        });
-
-        const totalParticipations = await db.communitySeed.count({
-          where: { userId: stat.userId },
-        });
-
-        const winRate = totalParticipations > 0 ? (stat._count.won / totalParticipations) * 100 : 0;
-
-        return {
-          rank: index + 1,
-          user: user!,
-          totalWins: stat._count.won,
-          totalParticipations,
-          winRate: Math.round(winRate * 100) / 100,
-        };
-      })
-    );
+    const leaderboard = [] as any[];
+    for (let i = 0; i < winStats.length; i++) {
+      const stat = winStats[i];
+      const user = await User.findById(stat._id).select('id walletAddress').lean();
+      const totalParticipations = await CommunitySeed.countDocuments({ userId: stat._id });
+      const winRate = totalParticipations > 0 ? (stat.totalWins / totalParticipations) * 100 : 0;
+      leaderboard.push({ rank: i + 1, user: user!, totalWins: stat.totalWins, totalParticipations, winRate: Math.round(winRate * 100) / 100 });
+    }
 
     return leaderboard;
   }
@@ -304,7 +218,6 @@ export class CommunityService {
 
     const participants = await this.getCommunityRoundParticipants(roundId);
     
-    // Cache for TTL period
     const cacheData: any = {};
     participants.participants.forEach((p: any) => {
       cacheData[p.userId] = JSON.stringify({

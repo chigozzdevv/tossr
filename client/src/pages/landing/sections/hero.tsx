@@ -16,10 +16,7 @@ export function Hero() {
       navigate('/app')
       return
     }
-    const publicKey = await connect()
-    if (publicKey) {
-      navigate('/app')
-    }
+    await connect()
   }, [clearError, connect, navigate, user])
 
   return (
@@ -27,14 +24,14 @@ export function Hero() {
       <ParticleField />
       <div className="container hero-inner">
         <div>
-          <h1 className="hero-heading">Bet on Attested Randomness</h1>
+          <h1 className="hero-heading">Bet on Provable Randomness</h1>
           <p className="hero-sub">
             TEE-attested randomness via MagicBlock PER + VRF for range, parity, digit,
             modulo, pattern, jackpot and community markets — all settled in SOL on Solana.
           </p>
           <div className="row row-center">
             <button className="btn btn-primary" onClick={handleConnect} disabled={loading}>
-              {user ? 'Enter dashboard' : loading ? 'Connecting…' : 'Connect Wallet'}
+              {loading ? 'Connecting…' : 'Connect Wallet'}
             </button>
             <Button className="hidden sm:inline-flex" aria-label="View live rounds" asChild>
               <a href="#live-rounds">View live rounds</a>

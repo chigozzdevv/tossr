@@ -1,4 +1,4 @@
-import { db } from '@/config/database';
+import { User } from '@/config/database';
 import { generateJWT, verifySolanaMessage } from '@/utils/auth';
 import { AuthenticationError } from '@/shared/errors';
 import { logger } from '@/utils/logger';
@@ -30,16 +30,10 @@ export class AuthService {
     await redis.del(redisKeys.authNonce(publicKey));
 
     // Find or create user
-    let user = await db.user.findUnique({
-      where: { walletAddress: publicKey },
-    });
+    let user = await User.findOne({ walletAddress: publicKey });
 
     if (!user) {
-      user = await db.user.create({
-        data: {
-          walletAddress: publicKey,
-        },
-      });
+      user = await User.create({ walletAddress: publicKey });
 
       logger.info(`New user created: ${publicKey}`);
     }
@@ -57,9 +51,7 @@ export class AuthService {
   }
 
   async refreshSession(userId: string) {
-    const user = await db.user.findUnique({
-      where: { id: userId },
-    });
+    const user = await User.findById(userId);
 
     if (!user) {
       throw new AuthenticationError('User not found');

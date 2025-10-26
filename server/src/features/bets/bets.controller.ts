@@ -1,6 +1,6 @@
 import { FastifyRequest, FastifyReply } from 'fastify';
 import { BetsService } from './bets.service';
-import { db } from '@/config/database';
+import { LeaderboardEntry } from '@/config/database';
 import { success, paginated } from '@/utils/response';
 import { asyncHandler } from '@/utils/errors';
 import { requireAuth } from '@/features/auth';
@@ -97,27 +97,26 @@ export class BetsController {
     const { page = 1, limit = 20 } = request.query as { page?: number; limit?: number };
     
     const [entries, total] = await Promise.all([
-      db.leaderboardEntry.findMany({
-        orderBy: { totalPayout: 'desc' },
-        include: {
-          user: {
-            select: {
-              id: true,
-              walletAddress: true,
-            },
-          },
-        },
-        skip: (page - 1) * limit,
-        take: limit,
-      }),
-      db.leaderboardEntry.count(),
+      LeaderboardEntry.find({})
+        .populate({ path: 'userId', select: 'id walletAddress', model: 'User' })
+        .sort({ totalPayout: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      LeaderboardEntry.countDocuments(),
     ]);
 
     const items = entries.map((entry: any, index: number) => ({
-      ...entry,
-      rank: (page - 1) * limit + index + 1,
+      id: String(entry._id ?? entry.id),
+      user: entry.userId,
+      totalBets: entry.totalBets,
+      totalWon: entry.totalWon,
       totalStake: Number(entry.totalStake),
       totalPayout: Number(entry.totalPayout),
+      winRate: entry.winRate,
+      streak: entry.streak,
+      updatedAt: entry.updatedAt,
+      rank: (page - 1) * limit + index + 1,
     }));
 
     return paginated(reply, items, total, page, limit);

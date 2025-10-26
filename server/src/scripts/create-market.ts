@@ -1,5 +1,5 @@
 import 'dotenv/config'
-import { db } from '@/config/database'
+import { Market, connectDatabase, disconnectDatabase } from '@/config/database'
 import { getAdminKeypair } from '@/config/admin-keypair'
 import { TossrProgramService } from '@/solana/tossr-program-service'
 import { PublicKey } from '@solana/web3.js'
@@ -27,6 +27,7 @@ const MT = {
 } as const
 
 async function main() {
+  await connectDatabase()
   const p = args()
   const name = p.name
   type MarketTypeKey = keyof typeof MT
@@ -50,42 +51,32 @@ async function main() {
     : await svc.initializeMarket(admin, name, bps, typeCode, index, mintPk)
 
   // Persist in DB (create or update by name)
-  const existing = await db.market.findUnique({ where: { name } as any })
+  const existing = await Market.findOne({ name }).lean()
   let id: string
   if (existing) {
-    const updated = await db.market.update({
-      where: { id: existing.id },
-      data: {
-        isActive: true,
-        config: {
-          ...(existing.config as any || {}),
-          solanaAddress: marketPda.toString(),
-          mintAddress: mint,
-          houseEdgeBps: bps,
-          ...(partitionCount ? { partitionCount } : {}),
-        } as any,
-      },
-    })
-    id = updated.id
+    await Market.updateOne(
+      { _id: (existing as any)._id },
+      { $set: { isActive: true, config: { ...(existing as any).config || {}, solanaAddress: marketPda.toString(), mintAddress: mint, houseEdgeBps: bps, ...(partitionCount ? { partitionCount } : {}) } } }
+    )
+    id = String((existing as any)._id)
   } else {
-    const created = await db.market.create({
-      data: {
-        name,
-        type: typeKey as string,
-        isActive: true,
-        description: null,
-        config: {
-          solanaAddress: marketPda.toString(),
-          mintAddress: mint,
-          houseEdgeBps: bps,
-          ...(partitionCount ? { partitionCount } : {}),
-        },
-      } as any,
-    })
-    id = created.id
+    const created = await Market.create({
+      name,
+      type: typeKey as string,
+      isActive: true,
+      description: null,
+      config: {
+        solanaAddress: marketPda.toString(),
+        mintAddress: mint,
+        houseEdgeBps: bps,
+        ...(partitionCount ? { partitionCount } : {}),
+      },
+    } as any)
+    id = String((created as any)._id)
   }
 
   console.log(JSON.stringify({ id, name, type: typeKey, index, marketPda: marketPda.toString(), tx: signature }, null, 2))
+  await disconnectDatabase()
 }
 
 main().then(() => process.exit(0)).catch((e) => { console.error(e); process.exit(1) })

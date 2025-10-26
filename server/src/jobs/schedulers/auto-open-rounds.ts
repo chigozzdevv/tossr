@@ -1,4 +1,4 @@
-import { db } from '@/config/database'
+import { Market, Round, Bet } from '@/config/database'
 import { RoundStatus } from '@/shared/types'
 import { RoundsService } from '@/features/rounds/rounds.service'
 import { logger } from '@/utils/logger'
@@ -11,7 +11,7 @@ export async function autoOpenRounds() {
   if (running) return
   running = true
   try {
-    const markets = await db.market.findMany({ where: { isActive: true }, select: { id: true, name: true } })
+    const markets = await Market.find({ isActive: true }).select('_id name').lean()
     if (markets.length === 0) return
 
     const now = Date.now()
@@ -22,50 +22,45 @@ export async function autoOpenRounds() {
     const releaseGroupId = `batch-${scheduledReleaseAt.getTime()}`
 
     for (const market of markets) {
-      const latest = await db.round.findFirst({
-        where: { marketId: market.id },
-        orderBy: { roundNumber: 'desc' },
-      })
+      const latest = await Round.findOne({ marketId: market._id }).sort({ roundNumber: -1 }).lean()
 
       if (latest) {
         if (latest.status === RoundStatus.PREDICTING) {
-          logger.debug({ marketId: market.id, roundId: latest.id }, 'Market already has active round, skipping queue')
+          logger.debug({ marketId: market._id, roundId: latest._id }, 'Market already has active round, skipping queue')
           continue
         }
         if (latest.status === RoundStatus.LOCKED) {
-          const betCount = await db.bet.count({ where: { roundId: latest.id } })
+          const betCount = await Bet.countDocuments({ roundId: latest._id })
           if (betCount === 0) {
             try {
-              await roundsService.undelegateRound(latest.id)
-              logger.info({ roundId: latest.id, marketId: market.id }, 'Expired stale locked round (no bets)')
+              await roundsService.undelegateRound(String(latest._id))
+              logger.info({ roundId: latest._id, marketId: market._id }, 'Expired stale locked round (no bets)')
             } catch (e) {
-              logger.error({ roundId: latest.id, err: e }, 'Failed to expire stale locked round')
-              continue
+              logger.error({ roundId: latest._id, err: e }, 'Failed to expire stale locked round')
             }
           } else {
-            logger.debug({ marketId: market.id, roundId: latest.id }, 'Locked round awaiting settlement, skipping queue')
-            continue
+            logger.debug({ marketId: market._id, roundId: latest._id }, 'Locked round awaiting settlement; queuing next')
           }
         }
 
         if (latest.status === RoundStatus.QUEUED) {
           const scheduled = latest.scheduledReleaseAt ? new Date(latest.scheduledReleaseAt).getTime() : null
           if (scheduled && Math.abs(scheduled - scheduledReleaseAt.getTime()) < intervalMs) {
-            logger.debug({ marketId: market.id, roundId: latest.id }, 'Round already queued for upcoming batch')
+            logger.debug({ marketId: market._id, roundId: latest._id }, 'Round already queued for upcoming batch')
             continue
           }
         }
       }
 
       try {
-        const round = await roundsService.queueRound(market.id, scheduledReleaseAt, releaseGroupId)
+        const round = await roundsService.queueRound(String(market._id), scheduledReleaseAt, releaseGroupId)
         if (round.status === RoundStatus.QUEUED) {
-          logger.info({ marketId: market.id, marketName: market.name, roundId: round.id, releaseGroupId }, 'Queued round for batch release')
+          logger.info({ marketId: market._id, marketName: market.name, roundId: (round as any)._id, releaseGroupId }, 'Queued round for batch release')
         } else {
-          logger.debug({ marketId: market.id, status: round.status }, 'Queue skipped due to existing round state')
+          logger.debug({ marketId: market._id, status: round.status }, 'Queue skipped due to existing round state')
         }
       } catch (e) {
-        logger.error({ marketId: market.id, err: e }, 'Queue round failed')
+        logger.error({ marketId: market._id, err: e }, 'Queue round failed')
       }
     }
   } catch (error) {

@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { marketsService, type MarketSummary } from '@/services/markets.service'
+import { TrendChart } from '@/components/dashboard/trend-chart'
 
 type MarketCard = MarketSummary & {
-  accent: string
+  accent: { bg: string; border: string; chart: string }
   activityScore: number
   description: string
 }
@@ -15,11 +16,11 @@ type MarketFilter = {
 }
 
 const ACCENT_POOL = [
-  'linear-gradient(135deg, rgba(185,246,201,0.28), rgba(52,211,153,0.18))',
-  'linear-gradient(135deg, rgba(129,140,248,0.3), rgba(59,130,246,0.2))',
-  'linear-gradient(135deg, rgba(244,114,182,0.32), rgba(236,72,153,0.2))',
-  'linear-gradient(135deg, rgba(248,196,113,0.3), rgba(251,146,60,0.2))',
-  'linear-gradient(135deg, rgba(168,85,247,0.32), rgba(109,40,217,0.2))',
+  { bg: 'rgba(185,246,201,0.08)', border: 'rgba(185,246,201,0.25)', chart: '#34d399' },
+  { bg: 'rgba(129,140,248,0.08)', border: 'rgba(129,140,248,0.25)', chart: '#8b8cf8' },
+  { bg: 'rgba(244,114,182,0.08)', border: 'rgba(244,114,182,0.25)', chart: '#f472b6' },
+  { bg: 'rgba(248,196,113,0.08)', border: 'rgba(248,196,113,0.25)', chart: '#fbbf24' },
+  { bg: 'rgba(168,85,247,0.08)', border: 'rgba(168,85,247,0.25)', chart: '#a855f7' },
 ]
 
 const DESCRIPTIONS: Record<string, string> = {
@@ -146,13 +147,16 @@ export function MarketsPage() {
           <button
             key={market.id}
             className="card dashboard-market-card"
-            style={{ background: market.accent }}
+            style={{ 
+              background: market.accent.bg,
+              borderColor: market.accent.border
+            }}
             onClick={() => navigate(`/app/markets/${market.id}`)}
           >
             <div className="dashboard-market-card-header">
               <span className="dashboard-market-chip">{humanize(market.type)}</span>
               <span className={`dashboard-market-status ${market.isActive ? 'active' : 'paused'}`}>
-                {market.isActive ? 'Active' : 'Paused'}
+                {market.isActive ? '● Live' : '○ Paused'}
               </span>
             </div>
             <h2 className="dashboard-market-title">{market.name}</h2>
@@ -160,16 +164,16 @@ export function MarketsPage() {
             <div className="dashboard-market-metrics">
               <div>
                 <span className="dashboard-round-stat-label">Rounds</span>
-                <strong>{market._count?.rounds ?? 0}</strong>
+                <strong style={{ color: market.accent.chart, fontWeight: 900 }}>{market._count?.rounds ?? 0}</strong>
               </div>
               <div>
                 <span className="dashboard-round-stat-label">Bets</span>
-                <strong>{market._count?.bets ?? 0}</strong>
+                <strong style={{ color: market.accent.chart, fontWeight: 900 }}>{market._count?.bets ?? 0}</strong>
               </div>
               <div>
-                <span className="dashboard-round-stat-label">Momentum</span>
-                <div className="dashboard-round-trend-meter small">
-                  <div style={{ width: `${Math.min(100, Math.max(12, market.activityScore * 6))}%` }} />
+                <span className="dashboard-round-stat-label">Trend</span>
+                <div style={{ width: '80px', height: '28px', marginTop: '0.25rem' }}>
+                  <TrendChart value={market.activityScore / 10} color={market.accent.chart} height={28} />
                 </div>
               </div>
             </div>

@@ -3,7 +3,7 @@ import { motion } from 'framer-motion'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { roundsService, type Round } from '@/services/rounds.service'
 
-const DEFAULT_ROUND_DURATION_SECONDS = Number(import.meta.env.VITE_ROUND_DURATION_SECONDS ?? 300)
+const DEFAULT_ROUND_DURATION_SECONDS = Number(import.meta.env.VITE_ROUND_DURATION_SECONDS ?? 600)
 const ROUND_DURATION_MS = DEFAULT_ROUND_DURATION_SECONDS * 1000
 
 const MARKET_DESCRIPTIONS: Record<string, string> = {
@@ -188,7 +188,7 @@ const buildRoundOptions = (round: Round): RoundOption[] => {
 
 const formatCountdown = (seconds: number | null | undefined) => {
   if (seconds == null) return 'TBD'
-  if (seconds <= 0) return 'Now'
+  if (seconds <= 0) return 'Closing'
   const mins = Math.floor(seconds / 60)
   const secs = seconds % 60
   return `${mins}m ${secs.toString().padStart(2, '0')}s`
@@ -238,11 +238,15 @@ export function LiveRoundsSection() {
   const displayEntries = useMemo(() => {
     return activeRounds
       .map(({ round, timeLeftSeconds }) => ({ round, timeLeftSeconds }))
-      .filter(({ round }) => Boolean(round && round.market && round.market.name))
+      .filter(({ round, timeLeftSeconds }) => {
+        if (!round || !round.market || !round.market.name) return false
+        if (timeLeftSeconds !== null && timeLeftSeconds <= 0) return false
+        return true
+      })
       .slice(0, 8)
   }, [activeRounds])
 
-  const nextEndIn = activeRounds[0]?.timeLeftSeconds ?? null
+  const nextEndIn = displayEntries[0]?.timeLeftSeconds ?? null
 
   if (loading) {
     return (
@@ -333,7 +337,7 @@ export function LiveRoundsSection() {
 
               return (
                 <motion.div
-                  key={round.id}
+                  key={`${round.id}-${idx}`}
                   initial={{ opacity: 0, y: 8 }}
                   whileInView={{ opacity: 1, y: 0 }}
                   viewport={{ once: true, amount: 0.3 }}

@@ -31,7 +31,12 @@ async function request<T>(
   }
 
   try {
-    const response = await fetch(url, config)
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 15000)
+
+    const response = await fetch(url, { ...config, signal: controller.signal })
+    clearTimeout(timeoutId)
+    
     const data = await response.json()
 
     if (!response.ok) {
@@ -46,6 +51,9 @@ async function request<T>(
   } catch (error) {
     if (error instanceof ApiError) {
       throw error
+    }
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new ApiError('Request timeout', 0)
     }
     throw new ApiError('Network error', 0)
   }

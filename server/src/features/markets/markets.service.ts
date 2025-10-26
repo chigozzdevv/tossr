@@ -1,6 +1,5 @@
-import { db } from '@/config/database';
+import { Market, Round, Bet } from '@/config/database';
 import { MarketType } from '@/shared/types';
-import { mapServerToPrismaMarketType } from '@/utils/market-type-mapper';
 import { AuthenticationError, NotFoundError, ValidationError } from '@/shared/errors';
 import { TossrProgramService } from '@/solana/tossr-program-service';
 import { getAdminKeypair } from '@/config/admin-keypair';
@@ -11,91 +10,127 @@ const tossrProgram = new TossrProgramService();
 
 export class MarketsService {
   async getAllMarkets() {
-    return db.market.findMany({
-      where: { isActive: true },
-      orderBy: { name: 'asc' },
-      include: {
-        _count: {
-          select: {
-            rounds: true,
-            bets: true,
-          },
-        },
-      },
-    });
+    const markets = await Market.find({ isActive: true }).sort({ name: 1 }).lean();
+    const marketIds = markets.map(m => m._id);
+    const [roundCounts, betCounts] = await Promise.all([
+      Round.aggregate([{ $match: { marketId: { $in: marketIds } } }, { $group: { _id: '$marketId', c: { $sum: 1 } } }]),
+      Bet.aggregate([{ $match: { marketId: { $in: marketIds } } }, { $group: { _id: '$marketId', c: { $sum: 1 } } }]),
+    ]);
+    const rMap = new Map(roundCounts.map((r: any) => [String(r._id), r.c]));
+    const bMap = new Map(betCounts.map((r: any) => [String(r._id), r.c]));
+    return markets.map(m => ({
+      id: String(m._id),
+      name: (m as any).name,
+      type: (m as any).type,
+      description: (m as any).description ?? null,
+      isActive: (m as any).isActive,
+      config: (m as any).config,
+      createdAt: (m as any).createdAt,
+      updatedAt: (m as any).updatedAt,
+      _count: { rounds: rMap.get(String(m._id)) || 0, bets: bMap.get(String(m._id)) || 0 },
+    } as any));
   }
 
   async getMarketById(marketId: string) {
-    const market = await db.market.findUnique({
-      where: { id: marketId },
-      include: {
-        rounds: {
-          take: 10,
-          orderBy: { roundNumber: 'desc' },
-          include: {
-            _count: {
-              select: { bets: true },
-            },
-          },
-        },
-      },
-    });
+    const market = await Market.findById(marketId).lean();
 
     if (!market) {
       throw new NotFoundError('Market');
     }
 
-    return market;
+    const recentRounds = await Round.find({ marketId: market._id })
+      .sort({ roundNumber: -1 })
+      .limit(10)
+      .lean();
+    const betCounts = await Bet.aggregate([
+      { $match: { roundId: { $in: recentRounds.map(r => r._id) } } },
+      { $group: { _id: '$roundId', c: { $sum: 1 } } },
+    ]);
+    const bMap = new Map(betCounts.map((r: any) => [String(r._id), r.c]));
+    return {
+      id: String((market as any)._id),
+      name: (market as any).name,
+      type: (market as any).type,
+      description: (market as any).description ?? null,
+      isActive: (market as any).isActive,
+      config: (market as any).config,
+      createdAt: (market as any).createdAt,
+      updatedAt: (market as any).updatedAt,
+      rounds: recentRounds.map(r => ({
+        id: String(r._id),
+        marketId: r.marketId,
+        roundNumber: r.roundNumber,
+        status: r.status,
+        openedAt: r.openedAt,
+        lockedAt: r.lockedAt,
+        revealedAt: r.revealedAt,
+        settledAt: r.settledAt,
+        queuedAt: r.queuedAt,
+        releasedAt: r.releasedAt,
+        scheduledReleaseAt: r.scheduledReleaseAt,
+        releaseGroupId: (r as any).releaseGroupId,
+        _count: { bets: bMap.get(String(r._id)) || 0 },
+      })),
+    } as any;
   }
 
   async getMarketByType(type: MarketType) {
-    return db.market.findFirst({
-      where: { type: mapServerToPrismaMarketType(type) },
-      include: {
-        rounds: {
-          take: 1,
-          orderBy: { roundNumber: 'desc' },
-          where: { status: 'PREDICTING' },
-        },
-      },
-    });
+    const market = await Market.findOne({ type }).lean();
+    if (!market) return null as any;
+    const round = await Round.findOne({ marketId: market._id, status: 'PREDICTING' }).sort({ roundNumber: -1 }).lean();
+    return { ...market, rounds: round ? [round] : [] } as any;
   }
 
   async getActiveRounds() {
-    return db.round.findMany({
-      where: { status: 'PREDICTING' },
-      include: {
-        market: true,
-        _count: {
-          select: { bets: true },
-        },
-      },
-      orderBy: { openedAt: 'asc' },
-    });
+    const rounds = await Round.find({ status: 'PREDICTING' }).sort({ openedAt: 1 }).lean();
+    const marketIds = Array.from(new Set(rounds.map(r => r.marketId)));
+    const markets = await Market.find({ _id: { $in: marketIds } }).select('name type config').lean();
+    const mMap = new Map(markets.map((m: any) => [String(m._id), m]));
+    const betCounts = await Bet.aggregate([{ $match: { roundId: { $in: rounds.map(r => r._id) } } }, { $group: { _id: '$roundId', c: { $sum: 1 } } }]);
+    const bMap = new Map(betCounts.map((r: any) => [String(r._id), r.c]));
+    return rounds.map(r => ({
+      id: String(r._id),
+      marketId: r.marketId,
+      roundNumber: r.roundNumber,
+      status: r.status,
+      openedAt: r.openedAt,
+      lockedAt: r.lockedAt,
+      revealedAt: r.revealedAt,
+      settledAt: r.settledAt,
+      queuedAt: r.queuedAt,
+      releasedAt: r.releasedAt,
+      scheduledReleaseAt: r.scheduledReleaseAt,
+      releaseGroupId: (r as any).releaseGroupId,
+      market: mMap.get(String(r.marketId)),
+      _count: { bets: bMap.get(String(r._id)) || 0 },
+    })) as any;
   }
 
   async getMarketHistory(marketId: string, limit: number = 50) {
-    const market = await db.market.findUnique({
-      where: { id: marketId },
-    });
+    const market = await Market.findById(marketId).lean();
 
     if (!market) {
       throw new NotFoundError('Market');
     }
 
-    return db.round.findMany({
-      where: { 
-        marketId,
-        status: 'SETTLED' 
-      },
-      include: {
-        _count: {
-          select: { bets: true },
-        },
-      },
-      orderBy: { settledAt: 'desc' },
-      take: limit,
-    });
+    const rounds = await Round.find({ marketId, status: 'SETTLED' }).sort({ settledAt: -1 }).limit(limit).lean();
+    const betCounts = await Bet.aggregate([{ $match: { roundId: { $in: rounds.map(r => r._id) } } }, { $group: { _id: '$roundId', c: { $sum: 1 } } }]);
+    const bMap = new Map(betCounts.map((r: any) => [String(r._id), r.c]));
+    return rounds.map(r => ({
+      id: String(r._id),
+      marketId: r.marketId,
+      roundNumber: r.roundNumber,
+      status: r.status,
+      openedAt: r.openedAt,
+      lockedAt: r.lockedAt,
+      revealedAt: r.revealedAt,
+      settledAt: r.settledAt,
+      queuedAt: r.queuedAt,
+      releasedAt: r.releasedAt,
+      scheduledReleaseAt: r.scheduledReleaseAt,
+      releaseGroupId: (r as any).releaseGroupId,
+      _count: { bets: bMap.get(String(r._id)) || 0 },
+    })) as any;
   }
 
   async updateHouseEdgeBps(marketId: string, houseEdgeBps: number, user: { id: string; walletAddress: string }) {
@@ -103,13 +138,12 @@ export class MarketsService {
       throw new ValidationError('houseEdgeBps must be between 0 and 10000');
     }
 
-    const market = await db.market.findUnique({ where: { id: marketId } });
+    const market = await Market.findById(marketId).lean();
     if (!market) {
       throw new NotFoundError('Market');
     }
 
     const adminKeypair = getAdminKeypair();
-    // Optional: restrict endpoint to admin wallet
     if (user.walletAddress.toLowerCase() !== adminKeypair.publicKey.toString().toLowerCase()) {
       throw new AuthenticationError('Admin only');
     }
@@ -117,12 +151,10 @@ export class MarketsService {
     const cfg = getMarketConfig(market.config as unknown);
     const marketPubkey = new PublicKey(cfg.solanaAddress);
 
-    // On-chain update
     const signature = await tossrProgram.setHouseEdgeBps(marketPubkey, houseEdgeBps, adminKeypair);
 
-    // Mirror into DB config for server-side odds display
     const newConfig = { ...cfg, houseEdgeBps } as any;
-    await db.market.update({ where: { id: marketId }, data: { config: newConfig } });
+    await Market.updateOne({ _id: marketId }, { $set: { config: newConfig } });
 
     return { marketId, houseEdgeBps, tx: signature };
   }
@@ -141,8 +173,7 @@ export class MarketsService {
     if (!isValidType) {
       throw new ValidationError('Invalid market type');
     }
-    const prismaType = mapServerToPrismaMarketType(type as MarketType);
-    const markets = await db.market.findMany({ where: { type: prismaType } });
+    const markets = await Market.find({ type }).lean();
     if (!markets.length) return { updated: 0, signatures: [] as string[] };
 
     const signatures: string[] = [];
@@ -151,7 +182,7 @@ export class MarketsService {
       const marketPubkey = new PublicKey(cfg.solanaAddress);
       const sig = await tossrProgram.setHouseEdgeBps(marketPubkey, houseEdgeBps, adminKeypair);
       const newConfig = { ...cfg, houseEdgeBps } as any;
-      await db.market.update({ where: { id: market.id }, data: { config: newConfig } });
+      await Market.updateOne({ _id: market._id }, { $set: { config: newConfig } });
       signatures.push(sig);
     }
 

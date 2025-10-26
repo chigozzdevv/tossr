@@ -1,4 +1,4 @@
-import { db } from '@/config/database';
+import { Bet, User, Round, Attestation, Market } from '@/config/database';
 import { config } from '@/config/env';
 
 type Granularity = 'daily' | 'weekly';
@@ -16,22 +16,21 @@ export class AnalyticsService {
       attestationsTotal,
       attestationsVerified,
     ] = await Promise.all([
-      db.bet.count(),
-      db.bet.count({ where: { status: 'WON' } }),
-      db.bet.count({ where: { status: 'PENDING' } }),
-      db.bet.aggregate({ _sum: { stake: true } }),
-      db.bet.aggregate({ where: { status: 'WON' }, _sum: { payout: true } }),
-      db.user.count(),
-      db.round.count({ where: { status: 'SETTLED' } }),
-      db.attestation.count(),
-      db.attestation.count({ where: { verified: true } }),
+      Bet.countDocuments(),
+      Bet.countDocuments({ status: 'WON' }),
+      Bet.countDocuments({ status: 'PENDING' }),
+      Bet.aggregate([{ $group: { _id: null, total: { $sum: '$stake' } } }]),
+      Bet.aggregate([{ $match: { status: 'WON' } }, { $group: { _id: null, total: { $sum: '$payout' } } }]),
+      User.countDocuments(),
+      Round.countDocuments({ status: 'SETTLED' }),
+      Attestation.countDocuments(),
+      Attestation.countDocuments({ verified: true }),
     ]);
 
-    const roundsForTiming = await db.round.findMany({
-      where: { lockedAt: { not: null }, revealedAt: { not: null }, settledAt: { not: null } },
-      select: { lockedAt: true, revealedAt: true, settledAt: true },
-      take: 5000,
-    });
+    const roundsForTiming = await Round.find({ lockedAt: { $ne: null }, revealedAt: { $ne: null }, settledAt: { $ne: null } })
+      .select('lockedAt revealedAt settledAt')
+      .limit(5000)
+      .lean();
     let lockToRevealMs = 0;
     let revealToSettleMs = 0;
     if (roundsForTiming.length > 0) {
@@ -43,8 +42,8 @@ export class AnalyticsService {
       revealToSettleMs = Math.round(revealToSettleMs / roundsForTiming.length);
     }
 
-    const totalStaked = Number(stakeAgg._sum.stake || 0);
-    const totalPaid = Number(payoutAgg._sum.payout || 0);
+    const totalStaked = Number((stakeAgg[0]?.total) || 0);
+    const totalPaid = Number((payoutAgg[0]?.total) || 0);
     const profitLoss = totalPaid - totalStaked;
     const winRate = totalBets > 0 ? (wonBets / totalBets) * 100 : 0;
     const verificationRate = attestationsTotal > 0 ? (attestationsVerified / attestationsTotal) * 100 : 0;
@@ -75,30 +74,23 @@ export class AnalyticsService {
   }
 
   async getMarketMetrics() {
-    const markets = await db.market.findMany({ select: { id: true, name: true, type: true } });
-    const perMarketBets = await db.bet.groupBy({
-      by: ['marketId'],
-      _count: { _all: true },
-      _sum: { stake: true, payout: true },
-    });
-    const perMarketRounds = await db.round.groupBy({ by: ['marketId'], _count: { _all: true } });
+    const markets = await Market.find({}).select('name type').lean();
+    const perMarketBets = await Bet.aggregate([
+      { $group: { _id: '$marketId', totalBets: { $sum: 1 }, totalStake: { $sum: '$stake' }, totalPayout: { $sum: '$payout' } } }
+    ]);
+    const perMarketRounds = await Round.aggregate([{ $group: { _id: '$marketId', count: { $sum: 1 } } }]);
+    const roundsSettledByMarket = await Round.aggregate([{ $match: { status: 'SETTLED' } }, { $group: { _id: '$marketId', count: { $sum: 1 } } }]);
 
-    const roundsSettledByMarket = await db.round.groupBy({
-      by: ['marketId'],
-      where: { status: 'SETTLED' },
-      _count: { _all: true },
-    });
-
-    const roundsByMarketMap = new Map(perMarketRounds.map((r: any) => [r.marketId, r._count._all]));
-    const settledByMarketMap = new Map(roundsSettledByMarket.map((r: any) => [r.marketId, r._count._all]));
+    const roundsByMarketMap = new Map(perMarketRounds.map((r: any) => [String(r._id), r.count]));
+    const settledByMarketMap = new Map(roundsSettledByMarket.map((r: any) => [String(r._id), r.count]));
 
     const result = markets.map((m: any) => {
-      const b = perMarketBets.find((x: any) => x.marketId === m.id);
-      const totalStake = Number(b?._sum.stake || 0);
-      const totalPayout = Number(b?._sum.payout || 0);
-      const totalBets = b?._count._all || 0;
-      const totalRounds = roundsByMarketMap.get(m.id) || 0;
-      const settledRounds = settledByMarketMap.get(m.id) || 0;
+      const b = perMarketBets.find((x: any) => String(x._id) === String(m._id));
+      const totalStake = Number(b?.totalStake || 0);
+      const totalPayout = Number(b?.totalPayout || 0);
+      const totalBets = b?.totalBets || 0;
+      const totalRounds = roundsByMarketMap.get(String(m._id)) || 0;
+      const settledRounds = settledByMarketMap.get(String(m._id)) || 0;
       const avgBetsPerRound = Number(totalRounds) > 0 ? Math.round((Number(totalBets) / Number(totalRounds)) * 100) / 100 : 0;
       const profitLoss = totalPayout - totalStake;
       return {
@@ -141,11 +133,7 @@ export class AnalyticsService {
 
   async getTimeSeries(days: number = 14, granularity: Granularity = 'daily') {
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-    const bets = await db.bet.findMany({
-      where: { createdAt: { gte: since } },
-      select: { createdAt: true, stake: true, payout: true },
-      orderBy: { createdAt: 'asc' },
-    });
+    const bets = await Bet.find({ createdAt: { $gte: since } }).select('createdAt stake payout').sort({ createdAt: 1 }).lean();
 
     const byKey = new Map<string, { date: string; bets: number; volume: number; payout: number }>();
     const toKey = (d: Date) => {
@@ -174,11 +162,7 @@ export class AnalyticsService {
   }
 
   private async countActiveUsersSince(since: Date) {
-    const grouped = await db.bet.groupBy({
-      by: ['userId'],
-      where: { createdAt: { gte: since } },
-      _count: { userId: true },
-    });
-    return grouped.length;
+    const distinct = await Bet.distinct('userId', { createdAt: { $gte: since } });
+    return distinct.length;
   }
 }

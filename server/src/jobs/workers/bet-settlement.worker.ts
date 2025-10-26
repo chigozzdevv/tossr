@@ -1,6 +1,6 @@
 import { Job } from 'bullmq';
 import { createWorker } from '../queue-config';
-import { db } from '@/config/database';
+import { Round, Bet, LeaderboardEntry } from '@/config/database';
 import { BetStatus, RoundStatus } from '@/shared/types';
 import { logger } from '@/utils/logger';
 import { SettleBetsJobData } from '../queues';
@@ -16,26 +16,18 @@ async function processBetSettlementJob(job: Job<SettleBetsJobData>) {
 
   logger.info({ roundId }, 'Processing bet settlement job');
 
-  const round = await db.round.findUnique({
-    where: { id: roundId },
-    include: {
-      market: true,
-      bets: {
-        where: { status: BetStatus.PENDING },
-        include: {
-          user: { select: { walletAddress: true } },
-        },
-      },
-    },
-  });
+  const round = await Round.findById(roundId).populate({ path: 'marketId', model: 'Market' }).lean();
+  const pendingBets = await Bet.find({ roundId, status: BetStatus.PENDING })
+    .populate({ path: 'userId', select: 'walletAddress', model: 'User' })
+    .lean();
 
-  if (!round || !round.outcome) {
+  if (!round || !(round as any).outcome) {
     throw new Error(`Round ${roundId} not found or outcome not available`);
   }
 
-  const outcome = JSON.parse(round.outcome as any);
+  const outcome = typeof (round as any).outcome === 'string' ? JSON.parse((round as any).outcome as any) : (round as any).outcome;
 
-  const marketCfg = getMarketConfig(round.market.config as unknown);
+  const marketCfg = getMarketConfig((round as any).marketId.config as unknown);
   if (!marketCfg.mintAddress) {
     throw new Error('Missing mintAddress in market config');
   }
@@ -44,13 +36,13 @@ async function processBetSettlementJob(job: Job<SettleBetsJobData>) {
   const marketPubkey = new PublicKey(marketCfg.solanaAddress);
   const mint = new PublicKey(marketCfg.mintAddress);
 
-  for (const bet of round.bets) {
-    const won = checkBetWon(bet.selection as any, outcome, round.market.type);
+  for (const bet of pendingBets as any[]) {
+    const won = checkBetWon(bet.selection as any, outcome, (round as any).marketId.type);
     const payout = won ? Number(bet.stake) * Number(bet.odds) : 0;
 
     // Settle on-chain; program computes win + payout and transfers from vault
     try {
-      const userPk = new PublicKey(bet.user.walletAddress);
+      const userPk = new PublicKey(bet.userId.walletAddress);
       await tossrProgram.settleBet(
         marketPubkey,
         round.roundNumber,
@@ -59,30 +51,21 @@ async function processBetSettlementJob(job: Job<SettleBetsJobData>) {
         adminKeypair
       );
     } catch (e) {
-      logger.error({ betId: bet.id, err: e }, 'On-chain settle failed');
+      logger.error({ betId: bet._id, err: e }, 'On-chain settle failed');
       // Continue with DB update; system remains eventually consistent
     }
 
-    await db.bet.update({
-      where: { id: bet.id },
-      data: {
-        status: won ? BetStatus.WON : BetStatus.LOST,
-        payout: BigInt(payout),
-      },
-    });
+    await Bet.updateOne({ _id: bet._id }, { $set: { status: won ? BetStatus.WON : BetStatus.LOST, payout } });
 
     // Update leaderboard
     if (won) {
-      await updateLeaderboard(bet.userId, Number(bet.stake), payout);
+      await updateLeaderboard(String(bet.userId._id ?? bet.userId), Number(bet.stake), payout);
     }
 
-    logger.info({ betId: bet.id, won, payout }, 'Bet settled (on-chain + DB)');
+    logger.info({ betId: bet._id, won, payout }, 'Bet settled (on-chain + DB)');
   }
 
-  await db.round.update({
-    where: { id: roundId },
-    data: { status: RoundStatus.SETTLED },
-  });
+  await Round.updateOne({ _id: roundId }, { $set: { status: RoundStatus.SETTLED } });
 
   try {
     await tossrProgram.settleRound(marketPubkey, round.roundNumber, adminKeypair);
@@ -96,10 +79,7 @@ async function processBetSettlementJob(job: Job<SettleBetsJobData>) {
       round.roundNumber,
       adminKeypair
     );
-    await db.round.update({
-      where: { id: roundId },
-      data: { undelegateTxHash, settledAt: new Date() },
-    });
+    await Round.updateOne({ _id: roundId }, { $set: { undelegateTxHash, settledAt: new Date() } });
     logger.info({ roundId, undelegateTxHash }, 'Round committed and undelegated');
   } catch (e) {
     logger.error({ roundId, err: e }, 'Commit and undelegate failed');
@@ -163,22 +143,14 @@ function parseEntropySource(source: string): number {
 }
 
 async function updateLeaderboard(userId: string, stake: number, payout: number) {
-  await db.leaderboardEntry.upsert({
-    where: { userId },
-    create: {
-      userId,
-      totalStake: BigInt(stake),
-      totalPayout: BigInt(payout),
-      totalBets: 1,
-      totalWon: 1,
+  await LeaderboardEntry.findOneAndUpdate(
+    { userId },
+    {
+      $setOnInsert: { userId, totalBets: 0, totalWon: 0, totalStake: 0, totalPayout: 0, winRate: 0, streak: 0 },
+      $inc: { totalBets: 1, totalWon: 1, totalStake: stake, totalPayout: payout },
     },
-    update: {
-      totalStake: { increment: BigInt(stake) },
-      totalPayout: { increment: BigInt(payout) },
-      totalBets: { increment: 1 },
-      totalWon: { increment: 1 },
-    },
-  });
+    { upsert: true }
+  );
 }
 
 export const betSettlementWorker = createWorker<SettleBetsJobData>(

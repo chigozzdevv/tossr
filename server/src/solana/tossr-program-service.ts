@@ -83,7 +83,6 @@ export class TossrProgramService {
     stakeAmount: number,
     mint: PublicKey
   ): Promise<{ transaction: Transaction; betPda: PublicKey }> {
-    // Round PDA uses u64.to_le_bytes() in Rust
     const roundNumberBuffer = Buffer.alloc(8);
     roundNumberBuffer.writeBigUInt64LE(BigInt(roundNumber));
     
@@ -97,7 +96,6 @@ export class TossrProgramService {
       TOSSR_PROGRAM_ID
     );
 
-    // Bet PDA: [BET_SEED, round.key(), user.key()]
     const [betPda] = PublicKey.findProgramAddressSync(
       [BET_SEED, roundPda.toBuffer(), userPublicKey.toBuffer()],
       TOSSR_PROGRAM_ID

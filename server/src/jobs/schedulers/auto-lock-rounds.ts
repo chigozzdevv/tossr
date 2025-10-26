@@ -1,4 +1,4 @@
-import { db } from '@/config/database';
+import { Round } from '@/config/database';
 import { RoundStatus } from '@/shared/types';
 import { config } from '@/config/env';
 import { logger } from '@/utils/logger';
@@ -9,17 +9,11 @@ export async function autoLockRounds() {
     const now = new Date();
     const lockThreshold = new Date(now.getTime() - config.ROUND_DURATION_SECONDS * 1000);
 
-    const roundsToLock = await db.round.findMany({
-      where: {
-        status: RoundStatus.PREDICTING,
-        openedAt: {
-          lte: lockThreshold,
-        },
-      },
-    });
+    const roundsToLock = await Round.find({ status: RoundStatus.PREDICTING, openedAt: { $lte: lockThreshold } }).lean();
 
     for (const round of roundsToLock) {
-      const jobId = `lock-${round.id}`;
+      const roundId = String((round as any)._id);
+      const jobId = `lock-${roundId}`;
       const existingJob = await roundLifecycleQueue.getJob(jobId);
 
       if (existingJob) {
@@ -30,8 +24,8 @@ export async function autoLockRounds() {
         }
       }
 
-      await roundLifecycleQueue.add('lock-round', { roundId: round.id }, { jobId });
-      logger.info({ roundId: round.id }, 'Auto-lock job scheduled');
+      await roundLifecycleQueue.add('lock-round', { roundId }, { jobId });
+      logger.info({ roundId }, 'Auto-lock job scheduled');
     }
 
     if (roundsToLock.length > 0) {

@@ -6,7 +6,7 @@ const envSchema = z.object({
   PORT: z.string().default('3001'),
   LOG_LEVEL: z.enum(['error', 'warn', 'info', 'debug']).default('info'),
 
-  DATABASE_URL: z.string().min(1),
+  MONGODB_URI: z.string().min(1),
   REDIS_URL: z.string().min(1),
 
   SOLANA_RPC_URL: z.string().url(),

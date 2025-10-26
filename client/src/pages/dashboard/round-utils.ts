@@ -39,7 +39,8 @@ export function humanizeMarketType(type: string) {
 }
 
 export function buildRoundOptions(round: Round): RoundSelectionOption[] {
-  const config = toConfigObject(round.market.config)
+  if (!round || !(round as any).market) return []
+  const config = toConfigObject((round as any).market?.config)
   const houseEdgeBps = clamp(asNumber(config.houseEdgeBps, 0), 0, 10000)
   const edgeFactor = 10000 / (10000 + houseEdgeBps)
   const fromEqualBins = (n: number) => Math.max(1, Math.floor(n * edgeFactor * 100) / 100)
@@ -51,7 +52,7 @@ export function buildRoundOptions(round: Round): RoundSelectionOption[] {
 
   const options: RoundSelectionOption[] = []
 
-  switch (round.market.type) {
+  switch ((round as any).market?.type) {
     case 'PICK_RANGE': {
       const partitions = Math.max(1, Math.min(20, Math.floor(asNumber(config.partitionCount, 4))))
       const baseWidth = Math.floor(100 / partitions)

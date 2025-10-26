@@ -1,4 +1,4 @@
-import { db } from '@/config/database';
+import { Attestation, Round } from '@/config/database';
 import { redis } from '@/config/redis';
 import { NotFoundError, AttestationError } from '@/shared/errors';
 import { logger } from '@/utils/logger';
@@ -27,18 +27,16 @@ export class AttestationsService {
   }
 
   async createAttestation(teeAttestation: TeeAttestation) {
-    const savedAttestation = await db.attestation.create({
-      data: {
-        hash: teeAttestation.commitment_hash,
-        roundId: teeAttestation.round_id,
-        type: 'TEE',
-        payload: teeAttestation as any,
-        signature: teeAttestation.signature,
-        verified: false,
-      },
+    const savedAttestation = await Attestation.create({
+      hash: teeAttestation.commitment_hash,
+      roundId: teeAttestation.round_id,
+      type: 'TEE',
+      payload: teeAttestation as any,
+      signature: teeAttestation.signature,
+      verified: false,
     });
 
-    this.verifyAttestationOnChain(savedAttestation.id, teeAttestation).catch((error) => {
+    this.verifyAttestationOnChain((savedAttestation as any)._id.toString(), teeAttestation).catch((error) => {
       logger.error({ err: error, attestationId: savedAttestation.id }, 'Background verification failed');
     });
 
@@ -65,25 +63,14 @@ export class AttestationsService {
 
       const verificationTx = await this.submitVerificationToSolana(attestation);
 
-      await db.attestation.update({
-        where: { id: attestationId },
-        data: {
-          verified: true,
-          txHash: verificationTx,
-        },
-      });
+      await Attestation.updateOne({ _id: attestationId }, { $set: { verified: true, txHash: verificationTx } });
 
       logger.info(`Attestation verified on-chain: ${attestationId} - TX: ${verificationTx}`);
 
     } catch (error: unknown) {
       logger.error({ err: error }, 'Attestation verification failed');
 
-      await db.attestation.update({
-        where: { id: attestationId },
-        data: {
-          verified: false,
-        },
-      });
+      await Attestation.updateOne({ _id: attestationId }, { $set: { verified: false } });
 
       throw new AttestationError('Attestation verification failed');
     }
@@ -149,24 +136,14 @@ export class AttestationsService {
 
   async getAttestationByHash(hash: string) {
     // Avoid Prisma include typing issues by loading related round separately
-    const attestation = await db.attestation.findUnique({
-      where: { hash },
-    });
+    const attestation = await Attestation.findOne({ hash }).lean();
 
     if (!attestation) {
       throw new NotFoundError('Attestation');
     }
 
     const round = attestation.roundId
-      ? await db.round.findUnique({
-          where: { id: attestation.roundId },
-          select: {
-            id: true,
-            roundNumber: true,
-            status: true,
-            market: { select: { name: true, type: true } },
-          },
-        })
+      ? await Round.findById(attestation.roundId).select('roundNumber status marketId').lean()
       : null;
 
     return {
@@ -184,18 +161,8 @@ export class AttestationsService {
 
   async getAttestationsByRound(roundId: string) {
     const [attestations, round] = await Promise.all([
-      db.attestation.findMany({
-        where: { roundId },
-        orderBy: { createdAt: 'desc' },
-      }),
-      db.round.findUnique({
-        where: { id: roundId },
-        select: {
-          id: true,
-          roundNumber: true,
-          market: { select: { name: true, type: true } },
-        },
-      }),
+      Attestation.find({ roundId }).sort({ createdAt: -1 }).lean(),
+      Round.findById(roundId).select('roundNumber marketId').lean(),
     ]);
 
     return attestations.map((attestation: any) => ({
@@ -210,9 +177,7 @@ export class AttestationsService {
   }
 
   async verifyAttestationManually(hash: string) {
-    const attestation = await db.attestation.findUnique({
-      where: { hash },
-    });
+    const attestation = await Attestation.findOne({ hash }).lean();
 
     if (!attestation) {
       throw new NotFoundError('Attestation');
@@ -227,11 +192,9 @@ export class AttestationsService {
       };
     }
 
-    await this.verifyAttestationOnChain(attestation.id, attestation.payload as unknown as TeeAttestation);
+    await this.verifyAttestationOnChain(String((attestation as any)._id), attestation.payload as unknown as TeeAttestation);
 
-    const updated = await db.attestation.findUnique({
-      where: { id: attestation.id },
-    });
+    const updated = await Attestation.findById((attestation as any)._id).lean();
 
     return {
       hash,
@@ -245,17 +208,15 @@ export class AttestationsService {
     // Filter by market via round IDs to avoid relation-typed filters
     let roundFilter: { roundId?: { in: string[] } } = {};
     if (marketId) {
-      const roundIds = await db.round
-        .findMany({ where: { marketId }, select: { id: true } })
-        .then(rows => rows.map(r => r.id));
-      roundFilter = { roundId: { in: roundIds } };
+      const roundIds = await Round.find({ marketId }).select('_id').lean();
+      roundFilter = { roundId: { $in: roundIds.map(r => r._id) } } as any;
     }
 
     const [total, verified, pending, failed] = await Promise.all([
-      db.attestation.count({ where: { ...roundFilter } }),
-      db.attestation.count({ where: { ...roundFilter, verified: true } }),
-      db.attestation.count({ where: { ...roundFilter, verified: false } }),
-      db.attestation.count({ where: { ...roundFilter, verified: false } }), // Simplified tracking
+      Attestation.countDocuments({ ...(roundFilter as any) }),
+      Attestation.countDocuments({ ...(roundFilter as any), verified: true }),
+      Attestation.countDocuments({ ...(roundFilter as any), verified: false }),
+      Attestation.countDocuments({ ...(roundFilter as any), verified: false }),
     ]);
 
     const verificationRate = total > 0 ? (verified / total) * 100 : 0;

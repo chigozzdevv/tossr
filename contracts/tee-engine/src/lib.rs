@@ -43,7 +43,7 @@ pub struct TeeEngine {
     secret_key: SecretKey,
     public_key: PublicKey,
     secp: Secp256k1<secp256k1::All>,
-    streak_state: HashMap<String, u16>, // wallet_address -> current_streak
+    streak_state: HashMap<String, u16>,
 }
 
 impl TeeEngine {

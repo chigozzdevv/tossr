@@ -2,7 +2,6 @@ import { Connection, PublicKey } from '@solana/web3.js';
 import nacl from 'tweetnacl';
 import { config } from '@/config/env';
 import { logger } from '@/utils/logger';
-import { mapServerToTeeMarketType } from '@/utils/market-type-mapper';
 import { createHash } from 'crypto';
 import { getAdminKeypair } from '@/config/admin-keypair';
 
@@ -109,7 +108,21 @@ export class TeeService {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 30000);
 
-      const teeMarketType = mapServerToTeeMarketType(marketType as any);
+      const teeMarketType = ((): string => {
+        const map: Record<string, string> = {
+          PICK_RANGE: 'PickRange',
+          EVEN_ODD: 'EvenOdd',
+          LAST_DIGIT: 'LastDigit',
+          MODULO_THREE: 'ModuloThree',
+          PATTERN_OF_DAY: 'PatternOfDay',
+          SHAPE_COLOR: 'ShapeColor',
+          JACKPOT: 'Jackpot',
+          ENTROPY_BATTLE: 'EntropyBattle',
+          STREAK_METER: 'StreakMeter',
+          COMMUNITY_SEED: 'CommunitySeed',
+        };
+        return map[marketType] || 'PickRange';
+      })();
 
       const response = await fetch(endpoint, {
         method: 'POST',

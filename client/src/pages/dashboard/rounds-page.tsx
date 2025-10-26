@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { roundsService, type Round } from '@/services/rounds.service'
 import { buildRoundOptions, humanizeMarketType } from './round-utils'
+import { TrendChart } from '@/components/dashboard/trend-chart'
+import { CountdownTimer } from '@/components/dashboard/countdown-timer'
 
 type RoundSelectionEntry = {
   id: string
@@ -9,22 +11,23 @@ type RoundSelectionEntry = {
   label: string
   odds: number
   coverage?: string
-  accent: string
+  accent: { bg: string; border: string; chart: string }
   timeLeftLabel: string
   timeRatio: number
   trend: number
   bets: number
   selection: any
+  endsAt: Date
 }
 
-const ROUND_DURATION_SECONDS = Number(import.meta.env.VITE_ROUND_DURATION_SECONDS ?? 300)
+const ROUND_DURATION_SECONDS = Number(import.meta.env.VITE_ROUND_DURATION_SECONDS ?? 600)
 const ROUND_DURATION_MS = ROUND_DURATION_SECONDS * 1000
 const ACCENTS = [
-  'linear-gradient(135deg, rgba(185,246,201,0.35), rgba(98,223,152,0.2))',
-  'linear-gradient(135deg, rgba(138,180,248,0.4), rgba(65,105,225,0.25))',
-  'linear-gradient(135deg, rgba(168,85,247,0.4), rgba(109,40,217,0.2))',
-  'linear-gradient(135deg, rgba(244,114,182,0.4), rgba(236,72,153,0.25))',
-  'linear-gradient(135deg, rgba(251,191,36,0.35), rgba(249,115,22,0.25))',
+  { bg: 'rgba(185,246,201,0.08)', border: 'rgba(185,246,201,0.25)', chart: '#62df98' },
+  { bg: 'rgba(138,180,248,0.08)', border: 'rgba(138,180,248,0.25)', chart: '#8b8cf8' },
+  { bg: 'rgba(168,85,247,0.08)', border: 'rgba(168,85,247,0.25)', chart: '#a855f7' },
+  { bg: 'rgba(244,114,182,0.08)', border: 'rgba(244,114,182,0.25)', chart: '#f472b6' },
+  { bg: 'rgba(251,191,36,0.08)', border: 'rgba(251,191,36,0.25)', chart: '#fbbf24' },
 ]
 
 function clamp(value: number, min: number, max: number) {
@@ -52,6 +55,8 @@ function buildSelectionEntries(round: Round): RoundSelectionEntry[] {
   const options = buildRoundOptions(round)
   const { label: timeLeftLabel, ratio: timeRatio } = deriveTimeMeta(round.openedAt)
   const bets = round._count?.bets ?? 0
+  const opened = round.openedAt ? new Date(round.openedAt).getTime() : Date.now()
+  const endsAt = new Date(opened + ROUND_DURATION_MS)
 
   return options.map((option, idx) => ({
     id: `${round.id}-${option.id}`,
@@ -65,6 +70,7 @@ function buildSelectionEntries(round: Round): RoundSelectionEntry[] {
     trend: clamp((bets / 10) + (1 / Math.max(option.odds, 1)) + (1 - timeRatio), 0, 3),
     bets,
     selection: option.selection,
+    endsAt,
   }))
 }
 
@@ -138,7 +144,16 @@ export function RoundsPage() {
   }, [fetchRounds])
 
   const entries = useMemo(() => {
-    const active = rounds.filter((round) => round.status === 'PREDICTING')
+    const active = rounds.filter((round) => {
+      if (round.status !== 'PREDICTING') return false
+      if (!round.openedAt) return false
+      
+      const opened = new Date(round.openedAt).getTime()
+      const now = Date.now()
+      const timeLeft = opened + ROUND_DURATION_MS - now
+      
+      return timeLeft > 0
+    })
     return active.flatMap((round) => buildSelectionEntries(round))
   }, [rounds])
 
@@ -171,13 +186,8 @@ export function RoundsPage() {
   return (
     <div className="dashboard-panel dashboard-panel-split">
       <div className="dashboard-panel-header">
-        <div>
-          <h1 className="dashboard-title">Live Bets</h1>
-          <p className="dashboard-subtitle">Dive into active rounds and pick your edge</p>
-        </div>
-        <div className="dashboard-filter-tools">
-          <button className="btn" onClick={fetchRounds}>Refresh</button>
-        </div>
+        <h1 className="dashboard-title">Live Rounds</h1>
+        <button className="btn" onClick={fetchRounds}>Refresh</button>
       </div>
 
       <div className="dashboard-filter-bar">
@@ -200,31 +210,32 @@ export function RoundsPage() {
             <button
               key={entry.id}
               className="card dashboard-round-card"
-              style={{ background: entry.accent }}
+              style={{ 
+                background: entry.accent.bg,
+                borderColor: entry.accent.border
+              }}
               onClick={() => navigate(`/app/rounds/${entry.round.id}`, { state: { selection: entry.selection, highlight: entry.id } })}
             >
               <div className="dashboard-round-card-header">
-                <span className="dashboard-round-chip">{humanizeMarketType(entry.round.market.type)}</span>
-                <span className="dashboard-round-timer">Ends in {entry.timeLeftLabel}</span>
+                <span className="dashboard-round-market-type">{humanizeMarketType(entry.round.market.type)}</span>
+                <div style={{ width: '100px', height: '28px' }}>
+                  <TrendChart value={entry.trend} color={entry.accent.chart} height={28} />
+                </div>
               </div>
               <h2 className="dashboard-round-card-title">{entry.label}</h2>
-              <p className="dashboard-round-meta">Round #{entry.round.roundNumber} · {entry.round.market.name}</p>
+              <p className="dashboard-round-meta">Round #{entry.round.roundNumber}</p>
               <div className="dashboard-round-stats">
                 <div>
                   <span className="dashboard-round-stat-label">Odds</span>
-                  <strong className="dashboard-round-odds">{entry.odds.toFixed(entry.odds >= 10 ? 1 : 2)}x</strong>
+                  <strong className="dashboard-round-odds-bold" style={{ color: entry.accent.chart }}>{entry.odds.toFixed(entry.odds >= 10 ? 1 : 2)}x</strong>
                   {entry.coverage ? <span className="dashboard-round-coverage">{entry.coverage} coverage</span> : null}
                 </div>
-                <div className="dashboard-round-trend">
-                  <span className="dashboard-round-stat-label">Trend</span>
-                  <div className="dashboard-round-trend-meter">
-                    <div style={{ width: `${clamp((entry.trend / 3) * 100, 8, 100)}%` }} />
-                  </div>
-                  <span className="dashboard-round-bets">{entry.bets} bets live</span>
+                <div>
+                  <CountdownTimer endsAt={entry.endsAt} compact showIcon={false} />
                 </div>
               </div>
-              <div className="dashboard-round-progress">
-                <div className="dashboard-round-progress-bar" style={{ width: `${entry.timeRatio * 100}%` }} />
+              <div className="dashboard-round-footer">
+                <span className="dashboard-round-bets">{entry.bets} bets</span>
               </div>
             </button>
           ))}

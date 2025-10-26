@@ -1,13 +1,14 @@
-import { db } from '@/config/database'
+import { Round } from '@/config/database'
 import { RoundStatus } from '@/shared/types'
 import { RoundsService } from '@/features/rounds/rounds.service'
 import { logger } from '@/utils/logger'
 
 const roundsService = new RoundsService()
 let releasing = false
-const MAX_RPC_RPS = 100
-const RELEASE_DELAY_MS = Math.ceil(1000 / MAX_RPC_RPS)
-const MAX_CONCURRENT_RELEASES = 4
+const TARGET_RPS = 100
+const RELEASE_DELAY_MS = Math.ceil(1000 / TARGET_RPS)
+const JITTER_MS = 10
+const MAX_CONCURRENT_RELEASES = 1
 
 function chunk<T>(items: T[], size: number): T[][] {
   if (size <= 0 || items.length === 0) return []
@@ -18,24 +19,24 @@ function chunk<T>(items: T[], size: number): T[][] {
   return buckets
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 export async function releaseQueuedRounds() {
   if (releasing) return
   releasing = true
 
   try {
     const now = new Date()
-    const dueRounds = await db.round.findMany({
-      where: {
-        status: RoundStatus.QUEUED,
-        OR: [
-          { scheduledReleaseAt: null },
-          { scheduledReleaseAt: { lte: now } },
-        ],
-      },
-      include: { market: true },
-      orderBy: { scheduledReleaseAt: 'asc' },
-      take: 50,
+    const dueRounds = await Round.find({
+      status: RoundStatus.QUEUED,
+      $or: [ { scheduledReleaseAt: null }, { scheduledReleaseAt: { $lte: now } } ],
     })
+    .populate({ path: 'marketId', model: 'Market' })
+    .sort({ scheduledReleaseAt: 1 })
+    .limit(50)
+    .lean()
 
     if (dueRounds.length === 0) {
       return
@@ -43,7 +44,7 @@ export async function releaseQueuedRounds() {
 
     const groups = new Map<string, Array<typeof dueRounds[number]>>()
     for (const round of dueRounds) {
-      const key = round.releaseGroupId || `manual-${round.id}`
+      const key = (round as any).releaseGroupId || `manual-${(round as any)._id}`
       if (!groups.has(key)) {
         groups.set(key, [])
       }
@@ -54,47 +55,29 @@ export async function releaseQueuedRounds() {
       logger.info({ releaseGroupId: groupId, count: rounds.length }, 'Releasing queued round batch')
 
       const successfulRoundIds: string[] = []
-      const roundChunks = chunk(rounds, MAX_CONCURRENT_RELEASES)
-
-      for (const slice of roundChunks) {
-        const results = await Promise.allSettled(
-          slice.map((round) => roundsService.releaseQueuedRound(round.id))
-        )
-
-        for (let idx = 0; idx < slice.length; idx++) {
-          const round = slice[idx]
-          const result = results[idx]
-
-          if (!round || !result) continue
-
-          if (result.status === 'fulfilled') {
-            successfulRoundIds.push(round.id)
-            logger.info({ roundId: round.id, releaseGroupId: groupId }, 'Released queued round')
-          } else {
-            const reason = result.reason
-            logger.error({
-              roundId: round.id,
-              releaseGroupId: groupId,
-              err: reason instanceof Error ? reason : undefined,
-              errorMessage: reason instanceof Error ? reason.message : String(reason),
-            }, 'Failed to release queued round')
-          }
+      for (const round of rounds) {
+        try {
+          await roundsService.releaseQueuedRound(String((round as any)._id))
+          successfulRoundIds.push(String((round as any)._id))
+          logger.info({ roundId: (round as any)._id, releaseGroupId: groupId }, 'Released queued round')
+        } catch (reason: any) {
+          logger.error({
+            roundId: (round as any)._id,
+            releaseGroupId: groupId,
+            err: reason instanceof Error ? reason : undefined,
+            errorMessage: reason instanceof Error ? reason.message : String(reason),
+          }, 'Failed to release queued round')
         }
 
-        if (RELEASE_DELAY_MS > 0) {
-          await new Promise((resolve) => setTimeout(resolve, RELEASE_DELAY_MS))
+        const jitter = Math.floor(Math.random() * JITTER_MS)
+        if (RELEASE_DELAY_MS + jitter > 0) {
+          await sleep(RELEASE_DELAY_MS + jitter)
         }
       }
 
       if (successfulRoundIds.length > 0) {
         const syncTimestamp = new Date()
-        await db.round.updateMany({
-          where: { id: { in: successfulRoundIds } },
-          data: {
-            openedAt: syncTimestamp,
-            releasedAt: syncTimestamp,
-          },
-        })
+        await Round.updateMany({ _id: { $in: successfulRoundIds } }, { $set: { openedAt: syncTimestamp, releasedAt: syncTimestamp } })
         logger.info({ releaseGroupId: groupId, roundIds: successfulRoundIds }, 'Synchronized batch timestamps')
       }
     }

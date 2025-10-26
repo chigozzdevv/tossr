@@ -1,4 +1,4 @@
-import { db } from '@/config/database';
+import { Streak } from '@/config/database';
 import { redis } from '@/config/redis';
 import { StreakStatus, MarketType } from '@/shared/types';
 import { NotFoundError, ConflictError, ValidationError } from '@/shared/errors';
@@ -9,26 +9,13 @@ export class StreaksService {
   async createStreak(userId: string, marketId?: string, target?: number) {
     const streakTarget = target || Math.min(3, config.MAX_STREAK_TARGET);
     
-    const existingStreak = await db.streak.findFirst({
-      where: {
-        userId,
-        marketId: marketId || null,
-        status: StreakStatus.ACTIVE,
-      },
-    });
+    const existingStreak = await Streak.findOne({ userId, marketId: marketId || null, status: StreakStatus.ACTIVE }).lean();
 
     if (existingStreak) {
       throw new ConflictError('User already has an active streak');
     }
 
-    const streak = await db.streak.create({
-      data: {
-        userId,
-        marketId,
-        target: streakTarget,
-        status: StreakStatus.ACTIVE,
-      },
-    });
+    const streak = await Streak.create({ userId, marketId, target: streakTarget, status: StreakStatus.ACTIVE });
 
     // Cache active streak
     await redis.hset(
@@ -43,12 +30,7 @@ export class StreaksService {
   }
 
   async updateStreakProgress(userId: string, roundResult: 'won' | 'lost', roundId: string) {
-    const activeStreaks = await db.streak.findMany({
-      where: {
-        userId,
-        status: StreakStatus.ACTIVE,
-      },
-    });
+    const activeStreaks = await Streak.find({ userId, status: StreakStatus.ACTIVE }).lean();
 
     const updatedStreaks = [];
 
@@ -59,40 +41,23 @@ export class StreaksService {
         
         if (newStreakCount >= streak.target) {
           // Streak completed!
-          const completedStreak = await db.streak.update({
-            where: { id: streak.id },
-            data: {
-              currentStreak: newStreakCount,
-              status: StreakStatus.COMPLETED,
-              completedAt: new Date(),
-              lastRoundId: roundId,
-            },
-          });
+          await Streak.updateOne({ _id: (streak as any)._id }, { $set: { currentStreak: newStreakCount, status: StreakStatus.COMPLETED, completedAt: new Date(), lastRoundId: roundId } });
+          const completedStreak = await Streak.findById((streak as any)._id).lean();
           
           updatedStreaks.push({ ...completedStreak, result: 'completed' });
           
           logger.info(`Streak completed: ${streak.id} - User: ${userId} - Final count: ${newStreakCount}`);
         } else {
           // Continue streak
-          const updatedStreak = await db.streak.update({
-            where: { id: streak.id },
-            data: {
-              currentStreak: newStreakCount,
-              lastRoundId: roundId,
-            },
-          });
+          await Streak.updateOne({ _id: (streak as any)._id }, { $set: { currentStreak: newStreakCount, lastRoundId: roundId } });
+          const updatedStreak = await Streak.findById((streak as any)._id).lean();
           
           updatedStreaks.push({ ...updatedStreak, result: 'progress' });
         }
       } else {
         // Reset streaks (lost)
-        const resetStreak = await db.streak.update({
-          where: { id: streak.id },
-          data: {
-            status: StreakStatus.FAILED,
-            lastRoundId: roundId,
-          },
-        });
+        await Streak.updateOne({ _id: (streak as any)._id }, { $set: { status: StreakStatus.FAILED, lastRoundId: roundId } });
+        const resetStreak = await Streak.findById((streak as any)._id).lean();
         
         updatedStreaks.push({ ...resetStreak, result: 'failed' });
         
@@ -110,30 +75,16 @@ export class StreaksService {
     const where: any = { userId };
     if (status) where.status = status;
 
-    const streaks = await db.streak.findMany({
-      where,
-      include: {
-        user: {
-          select: {
-            id: true,
-            walletAddress: true,
-          },
-        },
-      },
-      orderBy: { startedAt: 'desc' },
-    });
+    const streaks = await Streak.find(where)
+      .populate({ path: 'userId', select: 'id walletAddress', model: 'User' })
+      .sort({ startedAt: -1 })
+      .lean();
 
     return streaks;
   }
 
   async getActiveStreak(userId: string, marketId?: string) {
-    const streak = await db.streak.findFirst({
-      where: {
-        userId,
-        marketId: marketId || null,
-        status: StreakStatus.ACTIVE,
-      },
-    });
+    const streak = await Streak.findOne({ userId, marketId: marketId || null, status: StreakStatus.ACTIVE }).lean();
 
     if (!streak) {
       throw new NotFoundError('Active streak');
@@ -143,24 +94,11 @@ export class StreaksService {
   }
 
   async getStreakLeaderboard(limit: number = 50) {
-    const topStreaks = await db.streak.findMany({
-      where: {
-        status: StreakStatus.COMPLETED,
-      },
-      include: {
-        user: {
-          select: {
-            id: true,
-            walletAddress: true,
-          },
-        },
-      },
-      orderBy: [
-        { target: 'desc' },
-        { completedAt: 'desc' },
-      ],
-      take: limit,
-    });
+    const topStreaks = await Streak.find({ status: StreakStatus.COMPLETED })
+      .populate({ path: 'userId', select: 'id walletAddress', model: 'User' })
+      .sort({ target: -1, completedAt: -1 })
+      .limit(limit)
+      .lean();
 
     return topStreaks.map((streak: any, index: number) => ({
       ...streak,
@@ -181,12 +119,7 @@ export class StreaksService {
 
   async validateStreakBet(userId: string, target: number, stake: number): Promise<boolean> {
     // Check if user already has active streak
-    const existingStreak = await db.streak.findFirst({
-      where: {
-        userId,
-        status: StreakStatus.ACTIVE,
-      },
-    });
+    const existingStreak = await Streak.findOne({ userId, status: StreakStatus.ACTIVE }).lean();
 
     if (existingStreak) {
       throw new ConflictError('User already has an active streak');
@@ -209,21 +142,12 @@ export class StreaksService {
     const where: any = {};
     if (userId) where.userId = userId;
 
-    const [
-      totalStreaks,
-      completedStreaks,
-      failedStreaks,
-      activeStreaks,
-      bestStreak,
-    ] = await Promise.all([
-      db.streak.count({ where }),
-      db.streak.count({ where: { ...where, status: StreakStatus.COMPLETED } }),
-      db.streak.count({ where: { ...where, status: StreakStatus.FAILED } }),
-      db.streak.count({ where: { ...where, status: StreakStatus.ACTIVE } }),
-      db.streak.findFirst({
-        where: { ...where, status: StreakStatus.COMPLETED },
-        orderBy: { target: 'desc' },
-      }),
+    const [ totalStreaks, completedStreaks, failedStreaks, activeStreaks, bestStreak ] = await Promise.all([
+      Streak.countDocuments(where),
+      Streak.countDocuments({ ...where, status: StreakStatus.COMPLETED }),
+      Streak.countDocuments({ ...where, status: StreakStatus.FAILED }),
+      Streak.countDocuments({ ...where, status: StreakStatus.ACTIVE }),
+      Streak.findOne({ ...where, status: StreakStatus.COMPLETED }).sort({ target: -1 }).lean(),
     ]);
 
     const completionRate = totalStreaks > 0 ? (completedStreaks / totalStreaks) * 100 : 0;
@@ -244,15 +168,8 @@ export class StreaksService {
     const cutoffTime = new Date();
     cutoffTime.setHours(cutoffTime.getHours() - 24); // 24 hours ago
 
-    const inactiveStreaks = await db.streak.updateMany({
-      where: {
-        status: StreakStatus.ACTIVE,
-        startedAt: { lt: cutoffTime },
-      },
-      data: {
-        status: StreakStatus.FAILED,
-      },
-    });
+    const res = await Streak.updateMany({ status: StreakStatus.ACTIVE, startedAt: { $lt: cutoffTime } }, { $set: { status: StreakStatus.FAILED } });
+    const inactiveStreaks = { count: (res as any).modifiedCount ?? (res as any).matchedCount } as any;
 
     logger.info(`Cleaned up ${inactiveStreaks.count} inactive streaks`);
 

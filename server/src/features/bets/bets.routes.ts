@@ -4,7 +4,6 @@ import { BetsController } from './bets.controller';
 const betsController = new BetsController();
 
 export async function betsRoutes(fastify: FastifyInstance) {
-  // All bet routes require authentication
   fastify.addHook('preHandler', async (request, reply) => {
     await fastify.verifyJWT(request, reply);
   });

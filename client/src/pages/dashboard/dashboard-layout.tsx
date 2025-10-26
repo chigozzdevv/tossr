@@ -48,16 +48,9 @@ export function DashboardLayout() {
             </NavLink>
           ))}
         </nav>
-        <div className="dashboard-sidebar-footer">
-          {user ? <span className="dashboard-sidebar-identity">{shortAddress(user.walletAddress)}</span> : null}
-        </div>
       </aside>
       <div className="dashboard-body">
         <header className="dashboard-topbar">
-          <div>
-            <span className="dashboard-topbar-title">Dashboard</span>
-            <span className="dashboard-topbar-sub">Solana Devnet</span>
-          </div>
           <div className="dashboard-topbar-actions">
             {user ? <span className="dashboard-topbar-identity">{shortAddress(user.walletAddress)}</span> : null}
             <Button variant="ghost" onClick={handleLogout} aria-label="Disconnect wallet">

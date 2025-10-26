@@ -3,7 +3,7 @@ import jwt from 'jsonwebtoken';
 import { config } from '@/config/env';
 import { AuthenticationError, NotFoundError } from '@/shared/errors';
 import { JwtPayload } from '@/shared/types';
-import { db } from '@/config/database';
+import { User } from '@/config/database';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -32,16 +32,13 @@ export async function verifyJWT(request: FastifyRequest, reply: FastifyReply) {
     const payload = decoded as JwtPayload;
 
     // Verify user exists in database
-    const user = await db.user.findUnique({
-      where: { id: payload.userId },
-      select: { id: true, walletAddress: true },
-    });
+    const user = await User.findById(payload.userId).select({ _id: 1, walletAddress: 1 }).lean();
 
     if (!user) {
       throw new NotFoundError('User');
     }
 
-    request.user = user;
+    request.user = { id: user.id || (user as any)._id?.toString(), walletAddress: user.walletAddress };
   } catch (error) {
     throw new AuthenticationError('Invalid or expired token');
   }

@@ -1,5 +1,4 @@
-import { Prisma } from '@prisma/client';
-import { db } from '@/config/database';
+import { Market, Round, Bet } from '@/config/database';
 import { RoundStatus } from '@/shared/types';
 import { NotFoundError, ConflictError } from '@/shared/errors';
 import { TossrProgramService } from '@/solana/tossr-program-service';
@@ -17,11 +16,9 @@ const teeService = new TeeService();
 
 const ER_VALIDATOR = new PublicKey(config.ER_VALIDATOR_PUBKEY);
 
-type RoundWithMarket = Prisma.RoundGetPayload<{ include: { market: true } }>;
-
 export class RoundsService {
   async queueRound(marketId: string, scheduledReleaseAt: Date, releaseGroupId: string) {
-    const market = await db.market.findUnique({ where: { id: marketId } });
+    const market = await Market.findById(marketId).lean();
     if (!market) {
       throw new NotFoundError('Market');
     }
@@ -30,61 +27,59 @@ export class RoundsService {
       throw new ConflictError('Market is not active');
     }
 
-    const conflictingRound = await db.round.findFirst({
-      where: {
-        marketId,
-        status: { in: [RoundStatus.PREDICTING, RoundStatus.LOCKED, RoundStatus.QUEUED] },
-      },
-    });
+    const conflictingRound = await Round.findOne({
+      marketId,
+      status: { $in: [RoundStatus.PREDICTING, RoundStatus.QUEUED] },
+    }).lean();
 
     if (conflictingRound) {
-      logger.debug({ marketId, roundId: conflictingRound.id, status: conflictingRound.status }, 'Market already has queued or active round, skipping queue');
+      logger.debug({ marketId, roundId: conflictingRound._id?.toString(), status: conflictingRound.status }, 'Market already has queued or active round, skipping queue');
       return conflictingRound;
     }
 
-    const lastRound = await db.round.findFirst({
-      where: { marketId },
-      orderBy: { roundNumber: 'desc' },
-    });
+    const lastRound = await Round.findOne({ marketId }).sort({ roundNumber: -1 }).lean();
 
     const nextRoundNumber = (lastRound?.roundNumber || 0) + 1;
 
-    const round = await db.round.create({
-      data: {
-        marketId,
-        roundNumber: nextRoundNumber,
-        status: RoundStatus.QUEUED,
-        queuedAt: new Date(),
-        scheduledReleaseAt,
-        releaseGroupId,
-      },
+    const round = await Round.create({
+      marketId,
+      roundNumber: nextRoundNumber,
+      status: RoundStatus.QUEUED,
+      queuedAt: new Date(),
+      scheduledReleaseAt,
+      releaseGroupId,
     });
 
-    logger.info({ marketId, roundId: round.id, releaseGroupId, scheduledReleaseAt }, 'Queued round for batch release');
+    logger.info({ marketId, roundId: (round as any)._id?.toString(), releaseGroupId, scheduledReleaseAt }, 'Queued round for batch release');
     return round;
   }
 
   async releaseQueuedRound(roundId: string) {
-    const queuedRound = await db.round.findUnique({
-      where: { id: roundId },
-      include: { market: true },
-    });
+    const queuedRound = await Round.findById(roundId).populate({ path: 'marketId', model: 'Market' });
 
     if (!queuedRound) {
       throw new NotFoundError('Round');
     }
 
-    if (queuedRound.status !== RoundStatus.QUEUED) {
+    if ((queuedRound as any).status !== RoundStatus.QUEUED) {
       logger.debug({ roundId, status: queuedRound.status }, 'Round not queued, skipping release');
       return queuedRound;
     }
 
-    return this.openRound(queuedRound.marketId, { queuedRound });
+    const mref = (queuedRound as any).marketId;
+    const marketId = typeof mref === 'object' && mref !== null ? String(mref._id ?? mref) : String(mref);
+
+    const active = await Round.findOne({ marketId, status: RoundStatus.PREDICTING }).lean();
+    if (active) {
+      logger.debug({ roundId, marketId, activeRoundId: active._id?.toString() }, 'Active round exists; skipping queued release');
+      return queuedRound as any;
+    }
+    return this.openRound(marketId, { queuedRound: queuedRound as any });
   }
 
-  async openRound(marketId: string, options?: { queuedRound?: RoundWithMarket }) {
+  async openRound(marketId: string, options?: { queuedRound?: any }) {
     const queuedRound = options?.queuedRound ?? null;
-    const market = queuedRound?.market ?? await db.market.findUnique({ where: { id: marketId } });
+    const market = queuedRound?.marketId ?? await Market.findById(marketId).lean();
     if (!market) {
       throw new NotFoundError('Market');
     }
@@ -94,35 +89,41 @@ export class RoundsService {
     }
 
     if (!queuedRound) {
-      const existingActiveRound = await db.round.findFirst({
-        where: {
-          marketId,
-          status: { in: [RoundStatus.PREDICTING, RoundStatus.LOCKED] },
-        },
-      });
-
-      if (existingActiveRound) {
-        const betCount = await db.bet.count({ where: { roundId: existingActiveRound.id } });
-        const hasBets = betCount > 0;
-        if (existingActiveRound.status === RoundStatus.PREDICTING || hasBets) {
-          throw new ConflictError('Market already has an active round');
-        }
+      const predicting = await Round.findOne({ marketId, status: RoundStatus.PREDICTING }).lean();
+      if (predicting) {
+        throw new ConflictError('Market already has an active round');
       }
     }
 
     const adminKeypair = getAdminKeypair();
-    const marketConfig = getMarketConfig(market.config as unknown);
+    const marketConfig = getMarketConfig((market as any).config as unknown);
     const marketPubkey = new PublicKey(marketConfig.solanaAddress);
-    const marketState = await tossrProgram.getMarketState(marketPubkey);
+    let marketState: { lastRound: number; isActive: boolean } | null = null;
+    {
+      const maxAttempts = 5;
+      let lastErr: any;
+      for (let i = 0; i < maxAttempts; i++) {
+        try {
+          marketState = await tossrProgram.getMarketState(marketPubkey);
+          break;
+        } catch (e: any) {
+          lastErr = e;
+          const msg = String(e?.message || '');
+          if (msg.includes('fetch failed') || msg.includes('UND_ERR_CONNECT_TIMEOUT')) {
+            await new Promise((r) => setTimeout(r, 300 * (i + 1)));
+            continue;
+          }
+          throw e;
+        }
+      }
+      if (!marketState) throw lastErr || new Error('Failed to fetch market state');
+    }
 
     if (!marketState.isActive) {
       throw new ConflictError('Market is not active on-chain');
     }
 
-    const lastRound = await db.round.findFirst({
-      where: { marketId },
-      orderBy: { roundNumber: 'desc' },
-    });
+    const lastRound = await Round.findOne({ marketId }).sort({ roundNumber: -1 }).lean();
 
     const desiredRound = queuedRound?.roundNumber ?? (lastRound?.roundNumber || 0) + 1;
     const nextOnChainRound = marketState.lastRound + 1;
@@ -130,11 +131,7 @@ export class RoundsService {
 
     const syncQueuedRoundNumber = async () => {
       if (queuedRound && queuedRound.roundNumber !== roundNumber) {
-        queuedRound.roundNumber = roundNumber;
-        await db.round.update({
-          where: { id: queuedRound.id },
-          data: { roundNumber },
-        });
+        await Round.updateOne({ _id: (queuedRound as any)._id }, { $set: { roundNumber } });
       }
     };
 
@@ -171,11 +168,9 @@ export class RoundsService {
 
     const openedAt = new Date();
 
-    let round;
     if (queuedRound) {
-      round = await db.round.update({
-        where: { id: queuedRound.id },
-        data: {
+      await Round.updateOne({ _id: (queuedRound as any)._id }, {
+        $set: {
           roundNumber,
           status: RoundStatus.PREDICTING,
           openedAt,
@@ -185,44 +180,70 @@ export class RoundsService {
         },
       });
     } else {
-      round = await db.round.upsert({
-        where: { marketId_roundNumber: { marketId, roundNumber } as any },
-        create: {
-          marketId,
-          roundNumber,
-          status: RoundStatus.PREDICTING,
-          openedAt,
-          releasedAt: openedAt,
-          solanaAddress: roundPda.toString(),
-          openTxHash: signature,
+      await Round.updateOne(
+        { marketId, roundNumber },
+        {
+          $setOnInsert: {
+            marketId,
+            roundNumber,
+          },
+          $set: {
+            status: RoundStatus.PREDICTING,
+            openedAt,
+            releasedAt: openedAt,
+            solanaAddress: roundPda.toString(),
+            openTxHash: signature,
+            scheduledReleaseAt: null,
+            releaseGroupId: null,
+            queuedAt: null,
+          },
         },
-        update: {
-          solanaAddress: roundPda.toString(),
-          openTxHash: signature,
-          status: RoundStatus.PREDICTING,
-          openedAt,
-          releasedAt: openedAt,
-          scheduledReleaseAt: null,
-          releaseGroupId: null,
-          queuedAt: null,
-        },
-      } as any);
+        { upsert: true }
+      );
     }
 
     try {
-      await this.delegateRoundToER(round.id, marketPubkey);
-      logger.info({ roundId: round.id, roundNumber, signature }, 'Round opened and delegated to ER');
+      const r = await Round.findOne({ marketId, roundNumber }, { _id: 1 }).lean();
+      await this.delegateRoundToER(String(r?._id), marketPubkey);
+      logger.info({ roundId: String(r?._id), roundNumber, signature }, 'Round opened and delegated to ER');
     } catch (error) {
-      logger.error({ roundId: round.id, error }, 'Failed to delegate round');
+      const r = await Round.findOne({ marketId, roundNumber }, { _id: 1 }).lean();
+      logger.error({ roundId: String(r?._id), error }, 'Failed to delegate round');
       throw error;
     }
 
-    return round;
+    const final = await Round.findOne({ marketId, roundNumber }).lean();
+    if (!final) return null as any;
+    return {
+      id: String(final._id),
+      marketId: final.marketId,
+      roundNumber: final.roundNumber,
+      status: final.status,
+      openedAt: final.openedAt,
+      lockedAt: final.lockedAt,
+      revealedAt: final.revealedAt,
+      settledAt: final.settledAt,
+      queuedAt: final.queuedAt,
+      releasedAt: final.releasedAt,
+      scheduledReleaseAt: final.scheduledReleaseAt,
+      releaseGroupId: (final as any).releaseGroupId,
+      solanaAddress: (final as any).solanaAddress,
+      openTxHash: (final as any).openTxHash,
+      commitTxHash: (final as any).commitTxHash,
+      commitStateTxHash: (final as any).commitStateTxHash,
+      revealTxHash: (final as any).revealTxHash,
+      delegateTxHash: (final as any).delegateTxHash,
+      undelegateTxHash: (final as any).undelegateTxHash,
+      attestation: (final as any).attestation,
+      outcome: (final as any).outcome,
+      createdAt: (final as any).createdAt,
+      updatedAt: (final as any).updatedAt,
+    } as any;
   }
 
   async delegateRoundToER(roundId: string, marketPubkey: PublicKey) {
     const adminKeypair = getAdminKeypair();
-    const round = await db.round.findUnique({ where: { id: roundId } });
+    const round = await Round.findById(roundId).lean();
 
     if (!round) {
       throw new NotFoundError('Round');
@@ -241,19 +262,13 @@ export class RoundsService {
       ER_VALIDATOR
     );
 
-    await db.round.update({
-      where: { id: roundId },
-      data: { delegateTxHash },
-    });
+    await Round.updateOne({ _id: roundId }, { $set: { delegateTxHash } });
 
     logger.info({ roundId, delegateTxHash }, 'Round delegated to ER');
   }
 
   async lockRound(roundId: string) {
-    const round = await db.round.findUnique({
-      where: { id: roundId },
-      include: { market: true },
-    });
+    const round = await Round.findById(roundId).populate({ path: 'marketId', model: 'Market' }).lean();
 
     if (!round) {
       throw new NotFoundError('Round');
@@ -269,12 +284,8 @@ export class RoundsService {
     }
 
     const adminKeypair = getAdminKeypair();
-    const marketConfig = getMarketConfig(round.market.config as unknown);
+    const marketConfig = getMarketConfig((round as any).marketId.config as unknown);
     const marketPubkey = new PublicKey(marketConfig.solanaAddress);
-
-    if (round.delegateTxHash) {
-      await tossrProgram.ensureRoundUndelegated(marketPubkey, round.roundNumber, adminKeypair);
-    }
 
     let lockTxHash: string;
     try {
@@ -299,44 +310,40 @@ export class RoundsService {
       }
     }
 
-    await db.round.update({
-      where: { id: roundId },
-      data: {
-        status: RoundStatus.LOCKED,
-        lockedAt: new Date(),
-        lockTxHash,
-      },
-    });
+    await Round.updateOne({ _id: roundId }, { $set: { status: RoundStatus.LOCKED, lockedAt: new Date(), lockTxHash } });
 
     logger.info({ roundId, lockTxHash }, 'Round locked');
 
-    const betCount = await db.bet.count({ where: { roundId } });
+    const betCount = await Bet.countDocuments({ roundId });
     if (betCount === 0) {
-      await db.round.update({
-        where: { id: roundId },
-        data: { status: RoundStatus.FAILED, settledAt: new Date() },
-      });
+      await Round.updateOne({ _id: roundId }, { $set: { status: RoundStatus.FAILED, settledAt: new Date() } });
       logger.info({ roundId }, 'Round expired (no bets)');
       return lockTxHash;
     }
 
     await this.generateAndCommitOutcome(roundId);
 
+    try {
+      const mref = (round as any).marketId
+      const marketId = typeof mref === 'object' && mref !== null ? String(mref._id ?? mref) : String(mref)
+      await this.openRound(marketId)
+      logger.info({ roundId, marketId }, 'Opened next round immediately after lock')
+    } catch (e) {
+      logger.error({ roundId, err: e }, 'Failed to open next round after lock')
+    }
+
     return lockTxHash;
   }
 
   async generateAndCommitOutcome(roundId: string) {
-    const round = await db.round.findUnique({
-      where: { id: roundId },
-      include: { market: true },
-    });
+    const round = await Round.findById(roundId).populate({ path: 'marketId', model: 'Market' }).lean();
 
     if (!round) {
       throw new NotFoundError('Round');
     }
 
     const adminKeypair = getAdminKeypair();
-    const marketConfig = getMarketConfig(round.market.config as unknown);
+    const marketConfig = getMarketConfig((round as any).marketId.config as unknown);
     const marketPubkey = new PublicKey(marketConfig.solanaAddress);
 
     const oracleQueue = new PublicKey(config.VRF_ORACLE_QUEUE);
@@ -391,7 +398,7 @@ export class RoundsService {
 
     const attestation = await teeService.generateOutcome(
       roundId,
-      round.market.type,
+      (round as any).marketId.type,
       { chainHash, vrfRandomness }
     );
 
@@ -408,17 +415,10 @@ export class RoundsService {
       adminKeypair
     );
 
-    await db.round.update({
-      where: { id: roundId },
-      data: {
-        attestation: JSON.stringify(attestation),
-        commitTxHash,
-      },
-    });
+    await Round.updateOne({ _id: roundId }, { $set: { attestation, commitTxHash } });
 
     logger.info({ roundId, commitTxHash }, 'Outcome hash committed (hidden until reveal)');
 
-    // Optional on-chain verification: ensure commitment hash stored on-chain matches
     try {
       const connection = new Connection(config.SOLANA_RPC_URL);
       const programId = new PublicKey(config.TOSSR_ENGINE_PROGRAM_ID);
@@ -439,7 +439,6 @@ export class RoundsService {
       }
       logger.info({ roundId }, 'Commit verification passed');
     } catch (e) {
-      // Make strict: abort the flow if commit not reflected on-chain as expected
       throw e;
     }
 
@@ -449,16 +448,13 @@ export class RoundsService {
   }
 
   async revealOutcome(roundId: string) {
-    const round = await db.round.findUnique({
-      where: { id: roundId },
-      include: { market: true },
-    });
+    const round = await Round.findById(roundId).populate({ path: 'marketId', model: 'Market' }).lean();
 
     if (!round || !round.attestation) {
       throw new NotFoundError('Round or attestation');
     }
 
-    const attestation = JSON.parse(round.attestation as any);
+    const attestation = typeof (round as any).attestation === 'string' ? JSON.parse((round as any).attestation as any) : (round as any).attestation;
     const outcome = attestation.outcome;
 
     const nonce = Buffer.from(attestation.nonce, 'hex');
@@ -466,7 +462,7 @@ export class RoundsService {
     const attestationSig = Buffer.from(attestation.signature, 'hex');
 
     const adminKeypair = getAdminKeypair();
-    const marketConfig = getMarketConfig(round.market.config as unknown);
+    const marketConfig = getMarketConfig((round as any).marketId.config as unknown);
     const marketPubkey = new PublicKey(marketConfig.solanaAddress);
 
     let revealTxHash: string;
@@ -533,23 +529,14 @@ export class RoundsService {
       throw new Error('Unsupported outcome type');
     }
 
-    await db.round.update({
-      where: { id: roundId },
-      data: {
-        revealTxHash,
-        revealedAt: new Date(),
-        status: RoundStatus.REVEALED,
-        outcome: JSON.stringify(outcome),
-      },
-    });
+    await Round.updateOne({ _id: roundId }, { $set: { revealTxHash, revealedAt: new Date(), status: RoundStatus.REVEALED, outcome } });
 
     logger.info({ roundId, revealTxHash }, 'Outcome revealed');
 
-    // Optional on-chain verification: ensure revealed outcome and inputs_hash match
     try {
       const connection = new Connection(config.SOLANA_RPC_URL);
       const programId = new PublicKey(config.TOSSR_ENGINE_PROGRAM_ID);
-      const marketConfig = getMarketConfig(round.market.config as unknown);
+      const marketConfig = getMarketConfig((round as any).marketId.config as unknown);
       const marketPubkey = new PublicKey(marketConfig.solanaAddress);
       const roundPda = await tossrProgram.getRoundPda(marketPubkey, round.roundNumber);
       const maxAttempts = 5;
@@ -575,7 +562,6 @@ export class RoundsService {
       }
       logger.info({ roundId }, 'Reveal verification passed');
     } catch (e) {
-      // Make strict: abort settlement/commit if reveal not reflected on-chain as expected
       throw e;
     }
 
@@ -584,16 +570,13 @@ export class RoundsService {
   }
 
   async commitRoundStateToBase(roundId: string) {
-    const round = await db.round.findUnique({
-      where: { id: roundId },
-      include: { market: true },
-    });
+    const round = await Round.findById(roundId).populate({ path: 'marketId', model: 'Market' }).lean();
 
     if (!round) {
       throw new NotFoundError('Round');
     }
 
-    const marketConfig = getMarketConfig(round.market.config as unknown);
+    const marketConfig = getMarketConfig((round as any).marketId.config as unknown);
     const marketPubkey = new PublicKey(marketConfig.solanaAddress);
     const adminKeypair = getAdminKeypair();
 
@@ -603,34 +586,25 @@ export class RoundsService {
       adminKeypair
     );
 
-    await db.round.update({
-      where: { id: roundId },
-      data: { commitStateTxHash },
-    });
+    await Round.updateOne({ _id: roundId }, { $set: { commitStateTxHash } });
 
     logger.info({ roundId, commitStateTxHash }, 'Round state committed to base layer');
   }
 
   async undelegateRound(roundId: string) {
-    const round = await db.round.findUnique({
-      where: { id: roundId },
-      include: { market: true },
-    });
+    const round = await Round.findById(roundId).populate({ path: 'marketId', model: 'Market' }).lean();
 
     if (!round) {
       throw new NotFoundError('Round');
     }
 
-    if (!round.delegateTxHash) {
-      await db.round.update({
-        where: { id: roundId },
-        data: { status: RoundStatus.SETTLED, settledAt: new Date() },
-      });
+    if (!(round as any).delegateTxHash) {
+      await Round.updateOne({ _id: roundId }, { $set: { status: RoundStatus.SETTLED, settledAt: new Date() } });
       logger.warn({ roundId }, 'Round was never delegated, marked SETTLED without undelegation');
       return;
     }
 
-    const marketConfig = getMarketConfig(round.market.config as unknown);
+    const marketConfig = getMarketConfig((round as any).marketId.config as unknown);
     const marketPubkey = new PublicKey(marketConfig.solanaAddress);
     const adminKeypair = getAdminKeypair();
 
@@ -640,14 +614,7 @@ export class RoundsService {
       adminKeypair
     );
 
-    await db.round.update({
-      where: { id: roundId },
-      data: {
-        status: RoundStatus.SETTLED,
-        undelegateTxHash,
-        settledAt: new Date(),
-      },
-    });
+    await Round.updateOne({ _id: roundId }, { $set: { status: RoundStatus.SETTLED, undelegateTxHash, settledAt: new Date() } });
 
     logger.info({ roundId, undelegateTxHash }, 'Round undelegated and settled');
 
@@ -655,63 +622,242 @@ export class RoundsService {
   }
 
   async getRound(roundId: string) {
-    const round = await db.round.findUnique({
-      where: { id: roundId },
-      include: {
-        market: true,
-        bets: {
-          select: {
-            id: true,
-            stake: true,
-            selection: true,
-            status: true,
-            createdAt: true,
-          },
-        },
-      },
-    });
+    const round = await Round.findById(roundId).lean();
 
     if (!round) {
       throw new NotFoundError('Round');
     }
 
+    const [bets, market] = await Promise.all([
+      Bet.find({ roundId: (round as any)._id }, { stake: 1, selection: 1, status: 1, createdAt: 1 }).lean(),
+      Market.findById((round as any).marketId).select('name type config').lean(),
+    ]);
     return {
-      ...round,
-      bets: round.bets.map((bet: any) => ({
-        ...bet,
-        stake: Number(bet.stake),
-      })),
-    };
+      id: String((round as any)._id),
+      marketId: (round as any).marketId,
+      roundNumber: (round as any).roundNumber,
+      status: (round as any).status,
+      openedAt: (round as any).openedAt,
+      lockedAt: (round as any).lockedAt,
+      revealedAt: (round as any).revealedAt,
+      settledAt: (round as any).settledAt,
+      queuedAt: (round as any).queuedAt,
+      releasedAt: (round as any).releasedAt,
+      scheduledReleaseAt: (round as any).scheduledReleaseAt,
+      releaseGroupId: (round as any).releaseGroupId,
+      solanaAddress: (round as any).solanaAddress,
+      openTxHash: (round as any).openTxHash,
+      commitTxHash: (round as any).commitTxHash,
+      commitStateTxHash: (round as any).commitStateTxHash,
+      revealTxHash: (round as any).revealTxHash,
+      delegateTxHash: (round as any).delegateTxHash,
+      undelegateTxHash: (round as any).undelegateTxHash,
+      attestation: (round as any).attestation,
+      outcome: (round as any).outcome,
+      createdAt: (round as any).createdAt,
+      updatedAt: (round as any).updatedAt,
+      market: market
+        ? { id: String((market as any)._id), name: (market as any).name, type: (market as any).type, config: (market as any).config }
+        : { id: String((round as any).marketId), name: '', type: '', config: {} },
+      bets: bets.map((b: any) => ({ id: String(b._id), stake: Number(b.stake), selection: b.selection, status: b.status, createdAt: b.createdAt })),
+    } as any;
   }
 
   async getActiveRounds(marketId?: string) {
-    const where: any = {
-      status: {
-        in: [RoundStatus.PREDICTING, RoundStatus.QUEUED],
-      },
-    };
+    const query: any = { status: RoundStatus.PREDICTING };
+    if (marketId) query.marketId = marketId;
+    const rounds = await Round.find(query).sort({ openedAt: 1 }).lean();
+    const marketIds = Array.from(new Set(rounds.map((r: any) => r.marketId)));
+    const markets = await Market.find({ _id: { $in: marketIds } }).select('name type config').lean();
+    const mMap = new Map(
+      markets.map((m: any) => [String(m._id), { id: String(m._id), name: m.name, type: m.type, config: m.config }])
+    );
+    const betCounts = await Bet.aggregate([
+      { $match: { roundId: { $in: rounds.map((r: any) => r._id) } } },
+      { $group: { _id: '$roundId', c: { $sum: 1 } } },
+    ]);
+    const bMap = new Map(betCounts.map((r: any) => [String(r._id), r.c]));
+    return rounds.map((r: any) => ({
+      id: String(r._id),
+      marketId: r.marketId,
+      roundNumber: r.roundNumber,
+      status: r.status,
+      openedAt: r.openedAt,
+      lockedAt: r.lockedAt,
+      revealedAt: r.revealedAt,
+      settledAt: r.settledAt,
+      queuedAt: r.queuedAt,
+      releasedAt: r.releasedAt,
+      scheduledReleaseAt: r.scheduledReleaseAt,
+      releaseGroupId: (r as any).releaseGroupId,
+      solanaAddress: (r as any).solanaAddress,
+      outcome: (r as any).outcome,
+      market: mMap.get(String(r.marketId)),
+      _count: { bets: bMap.get(String(r._id)) || 0 },
+    }));
+  }
 
-    if (marketId) {
-      where.marketId = marketId;
+  async getRoundAnalytics(roundId: string) {
+    const round = await Round.findById(roundId).lean();
+    if (!round) {
+      throw new NotFoundError('Round');
     }
 
-    const rounds = await db.round.findMany({
-      where,
-      include: {
-        market: {
-          select: { id: true, name: true, type: true, config: true },
-        },
-        _count: {
-          select: { bets: true },
-        },
-      },
-      orderBy: [
-        { status: 'desc' },
-        { scheduledReleaseAt: 'asc' },
-        { openedAt: 'desc' },
-      ],
+    const bets = await Bet.find({ roundId: (round as any)._id }).select('stake selection createdAt userId').lean();
+
+    const totalBets = bets.length;
+    const totalVolume = bets.reduce((sum, bet) => sum + Number(bet.stake), 0);
+    const uniqueUsers = new Set(bets.map(b => String((b as any).userId))).size;
+
+    const selectionMap = new Map<string, { bets: number; volume: number }>();
+    bets.forEach((bet: any) => {
+      const key = JSON.stringify(bet.selection);
+      const existing = selectionMap.get(key) || { bets: 0, volume: 0 };
+      existing.bets += 1;
+      existing.volume += Number(bet.stake);
+      selectionMap.set(key, existing);
     });
 
-    return rounds;
+    const selections = Array.from(selectionMap.entries()).map(([selection, data]) => ({
+      option: selection,
+      bets: data.bets,
+      volume: data.volume,
+      percentage: totalBets > 0 ? (data.bets / totalBets) * 100 : 0
+    }));
+
+    const timelineMap = new Map<string, { bets: number; volume: number }>();
+    bets.forEach((bet: any) => {
+      if (!bet.createdAt) return;
+      const timestamp = new Date(bet.createdAt);
+      timestamp.setMinutes(Math.floor(timestamp.getMinutes() / 5) * 5, 0, 0);
+      const key = timestamp.toISOString();
+      const existing = timelineMap.get(key) || { bets: 0, volume: 0 };
+      existing.bets += 1;
+      existing.volume += Number(bet.stake);
+      timelineMap.set(key, existing);
+    });
+
+    const timeline = Array.from(timelineMap.entries())
+      .map(([time, data]) => ({ time, bets: data.bets, volume: data.volume }))
+      .sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
+
+    const userBetCounts = new Map<string, number>();
+    bets.forEach((bet: any) => {
+      const userId = String(bet.userId);
+      userBetCounts.set(userId, (userBetCounts.get(userId) || 0) + 1);
+    });
+
+    const repeatBettors = Array.from(userBetCounts.values()).filter(count => count > 1).length;
+
+    let topBettor = null;
+    if (bets.length > 0) {
+      const userVolumes = new Map<string, number>();
+      bets.forEach((bet: any) => {
+        const userId = String(bet.userId);
+        userVolumes.set(userId, (userVolumes.get(userId) || 0) + Number(bet.stake));
+      });
+      const [topUserId, topVolume] = Array.from(userVolumes.entries()).reduce((max, entry) =>
+        entry[1] > max[1] ? entry : max
+      );
+      topBettor = { userId: topUserId, volume: topVolume };
+    }
+
+    const betSizes = bets.map(b => Number(b.stake));
+    const sortedSizes = betSizes.sort((a, b) => a - b);
+    const betSizeDistribution = {
+      min: sortedSizes[0] || 0,
+      max: sortedSizes[sortedSizes.length - 1] || 0,
+      median: sortedSizes[Math.floor(sortedSizes.length / 2)] || 0,
+      avg: totalBets > 0 ? totalVolume / totalBets : 0
+    };
+
+    const openedTime = round.openedAt ? new Date(round.openedAt).getTime() : Date.now();
+    const currentTime = Date.now();
+    const duration = currentTime - openedTime;
+    const firstHalfBets = bets.filter(b => b.createdAt && new Date(b.createdAt).getTime() < openedTime + duration / 2).length;
+    const secondHalfBets = totalBets - firstHalfBets;
+
+    let momentum: 'increasing' | 'stable' | 'decreasing' = 'stable';
+    if (secondHalfBets > firstHalfBets * 1.2) momentum = 'increasing';
+    else if (secondHalfBets < firstHalfBets * 0.8) momentum = 'decreasing';
+
+    let peakTime = null;
+    if (timeline.length > 0) {
+      const peak = timeline.reduce((max, entry) => entry.bets > max.bets ? entry : max);
+      peakTime = peak.time;
+    }
+
+    return {
+      overview: {
+        totalVolume,
+        totalBets,
+        uniqueUsers
+      },
+      timeline,
+      selections,
+      trends: {
+        avgBetSize: betSizeDistribution.avg,
+        peakTime,
+        momentum
+      },
+      userParticipation: {
+        uniqueUsers,
+        repeatBettors,
+        topBettor
+      },
+      betSizeDistribution
+    };
+  }
+
+  async getProbabilityHistory(roundId: string) {
+    const round = await Round.findById(roundId).populate({ path: 'marketId', model: 'Market' }).lean();
+    if (!round) {
+      throw new NotFoundError('Round');
+    }
+
+    const bets = await Bet.find({ roundId: (round as any)._id })
+      .select('selection createdAt stake')
+      .sort({ createdAt: 1 })
+      .lean();
+
+    if (bets.length === 0) {
+      return [];
+    }
+
+    const openedTime = round.openedAt ? new Date(round.openedAt).getTime() : Date.now();
+    const latestBetTime = bets[bets.length - 1].createdAt ? new Date(bets[bets.length - 1].createdAt).getTime() : Date.now();
+    const duration = latestBetTime - openedTime;
+    const intervalMs = Math.max(60000, Math.floor(duration / 20));
+
+    const snapshots = [];
+    let currentTime = openedTime;
+
+    while (currentTime <= latestBetTime) {
+      const betsUntilNow = bets.filter(b => b.createdAt && new Date(b.createdAt).getTime() <= currentTime);
+
+      if (betsUntilNow.length > 0) {
+        const selectionCounts = new Map<string, number>();
+        betsUntilNow.forEach((bet: any) => {
+          const key = JSON.stringify(bet.selection);
+          selectionCounts.set(key, (selectionCounts.get(key) || 0) + 1);
+        });
+
+        const totalBetsAtTime = betsUntilNow.length;
+        const probabilities = Array.from(selectionCounts.entries()).map(([selection, count]) => ({
+          selection,
+          probability: (count / totalBetsAtTime) * 100,
+          bets: count
+        }));
+
+        snapshots.push({
+          timestamp: new Date(currentTime).toISOString(),
+          probabilities
+        });
+      }
+
+      currentTime += intervalMs;
+    }
+
+    return snapshots;
   }
 }
