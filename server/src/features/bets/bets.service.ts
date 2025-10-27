@@ -7,6 +7,7 @@ import { TossrProgramService } from '@/solana/tossr-program-service';
 import { logger } from '@/utils/logger';
 import { config } from '@/config/env';
 import { PublicKey, Connection } from '@solana/web3.js';
+import { ConnectionMagicRouter } from '@magicblock-labs/ephemeral-rollups-sdk';
 import { getAssociatedTokenAddress } from '@solana/spl-token';
 import { getMarketConfig } from '@/utils/market-config';
 import bs58 from 'bs58';
@@ -119,66 +120,120 @@ export class BetsService {
     }
 
     const isDelegated = Boolean((round as any).delegateTxHash && !(round as any).undelegateTxHash);
-    const routerConn = new Connection(config.EPHEMERAL_RPC_URL);
-    const baseConn = new Connection(config.SOLANA_RPC_URL);
+    const erConn = new Connection(config.EPHEMERAL_RPC_URL, {
+      commitment: 'confirmed',
+      wsEndpoint: config.EPHEMERAL_WS_URL,
+    });
+    const routerEndpoint = config.EPHEMERAL_RPC_URL.includes('magicblock.app')
+      ? 'https://devnet-router.magicblock.app'
+      : config.EPHEMERAL_RPC_URL;
+    const routerConn =
+      routerEndpoint.includes('magicblock.app')
+        ? new ConnectionMagicRouter(routerEndpoint, {
+            commitment: 'confirmed',
+            httpHeaders: { 'Content-Type': 'application/json' },
+          } as any)
+        : new Connection(routerEndpoint, { commitment: 'confirmed' });
+    const baseConn = new Connection(config.SOLANA_RPC_URL, { commitment: 'confirmed' });
+
+    const connections = isDelegated
+      ? [erConn, routerConn, baseConn]
+      : [baseConn, erConn, routerConn];
+    const betPdaPk = new PublicKey(betPda);
+    const toNumber = (value: any) => {
+      if (typeof value === 'number') return value;
+      if (typeof value === 'bigint') return Number(value);
+      if (value && typeof value.toNumber === 'function') {
+        return value.toNumber();
+      }
+      if (value && typeof value.toString === 'function') {
+        const n = Number(value.toString());
+        return Number.isNaN(n) ? 0 : n;
+      }
+      return Number(value ?? 0);
+    };
 
     const tryGetTx = async () => {
-      const conns = isDelegated ? [routerConn, baseConn] : [baseConn, routerConn];
-      for (const conn of conns) {
+      for (const conn of connections) {
         try {
-          const res = await conn.getTransaction(txSignature, { maxSupportedTransactionVersion: 0 });
+          const res = await conn.getTransaction(txSignature, {
+            maxSupportedTransactionVersion: 0,
+            commitment: 'confirmed',
+            searchTransactionHistory: true,
+          } as any);
           if (res) return res;
-        } catch {
-        }
+        } catch {}
       }
       return null;
     };
 
     const checkSignatureStatus = async () => {
-      const conns = isDelegated ? [routerConn, baseConn] : [baseConn, routerConn];
-      for (const conn of conns) {
+      for (const conn of connections) {
         try {
-          const statuses = await conn.getSignatureStatuses([txSignature]);
-          if (statuses?.value?.[0]?.confirmationStatus && !statuses.value[0].err) {
+          const statuses = await conn.getSignatureStatuses([txSignature], {
+            searchTransactionHistory: true,
+          });
+          const status = statuses?.value?.[0];
+          if (status?.err) {
+            throw new ValidationError('Transaction failed on-chain');
+          }
+          if (status?.confirmationStatus) {
             return true;
           }
-        } catch {
+        } catch (err) {
+          if (err instanceof ValidationError) throw err;
         }
       }
       return false;
     };
 
+    const fetchBetAccount = async () => {
+      for (const conn of connections) {
+        try {
+          const info = await conn.getAccountInfo(betPdaPk, 'confirmed');
+          if (info) return info;
+        } catch {}
+      }
+      return null;
+    };
+
     let txResult = await tryGetTx();
+    let betAccountInfo = await fetchBetAccount();
     const deadline = Date.now() + 90000;
     let lastStatusCheck = 0;
 
-    while (!txResult && Date.now() < deadline) {
+    while (!betAccountInfo && !txResult && Date.now() < deadline) {
       const now = Date.now();
 
       if (now - lastStatusCheck > 3000) {
-        const hasStatus = await checkSignatureStatus();
+        const confirmed = await checkSignatureStatus();
         lastStatusCheck = now;
-
-        if (hasStatus) {
-          logger.info({ txSignature, roundId }, 'Transaction confirmed via signature status check');
-          break;
+        if (confirmed) {
+          logger.info({ txSignature, roundId }, 'Transaction confirmed via status polling');
+          betAccountInfo = await fetchBetAccount();
+          if (betAccountInfo) break;
         }
       }
 
-      await new Promise((r) => setTimeout(r, 2000));
+      await new Promise((r) => setTimeout(r, 1500));
       txResult = await tryGetTx();
+      if (!betAccountInfo) {
+        betAccountInfo = await fetchBetAccount();
+      }
     }
 
-    if (!txResult) {
+    if (!betAccountInfo && !txResult) {
       const finalStatusCheck = await checkSignatureStatus();
       if (!finalStatusCheck) {
         throw new ValidationError('Transaction not found on-chain after 90 seconds');
       }
-    } else if (txResult.meta?.err) {
+      betAccountInfo = await fetchBetAccount();
+    }
+
+    if (txResult?.meta?.err) {
       throw new ValidationError('Transaction failed on-chain');
     }
 
-    // Parse on-chain instruction to get authoritative stake/selection
     let finalStake = Number(stake);
     let decodedFromTx: { kind: number; a: number; b: number; c: number } | null = null;
     try {
@@ -206,6 +261,29 @@ export class BetsService {
       }
     } catch (e) {
       logger.warn({ err: e, txSignature }, 'Failed to parse stake from transaction; using client-provided stake');
+    }
+
+    if (!decodedFromTx && betAccountInfo) {
+      try {
+        const decodedBet = tossrProgram.decodeBetAccount(betAccountInfo.data);
+        if (decodedBet?.stake) {
+          const stakeFromAccount = toNumber(decodedBet.stake);
+          if (stakeFromAccount > 0) {
+            finalStake = stakeFromAccount;
+          }
+        }
+        if (decodedBet?.selection) {
+          const sel = decodedBet.selection;
+          decodedFromTx = {
+            kind: toNumber(sel.kind),
+            a: toNumber(sel.a),
+            b: toNumber(sel.b),
+            c: toNumber(sel.c),
+          };
+        }
+      } catch (err) {
+        logger.warn({ err, betPda }, 'Failed to decode bet account; falling back to client payload');
+      }
     }
 
     const cfg = getMarketConfig((round.marketId as any).config as unknown) as any;

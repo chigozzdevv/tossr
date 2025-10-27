@@ -203,6 +203,7 @@ export class RoundsService {
     }
 
     try {
+      await new Promise(r => setTimeout(r, 2000));
       const r = await Round.findOne({ marketId, roundNumber }, { _id: 1 }).lean();
       await this.delegateRoundToER(String(r?._id), marketPubkey);
       logger.info({ roundId: String(r?._id), roundNumber, signature }, 'Round opened and delegated to ER');
@@ -301,7 +302,11 @@ export class RoundsService {
       const msg = String(e?.message || '');
       if (msg.includes('6002') || msg.includes('InvalidState')) {
         lockTxHash = 'already-locked';
-      } else if (msg.includes('3007') || msg.includes('AccountOwnedByWrongProgram')) {
+      } else if (
+        msg.includes('3007') ||
+        msg.includes('AccountOwnedByWrongProgram') ||
+        msg.includes('loads a writable account that cannot be written')
+      ) {
         await tossrProgram.ensureRoundUndelegated(marketPubkey, round.roundNumber, adminKeypair);
         lockTxHash = await tossrProgram.lockRound(
           marketPubkey,

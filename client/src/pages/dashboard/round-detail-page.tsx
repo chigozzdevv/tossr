@@ -261,7 +261,10 @@ export function RoundDetailPage() {
 
       const isRoundDelegated = round.delegateTxHash && !round.undelegateTxHash
       const sendConn = isRoundDelegated
-        ? new Connection(config.EPHEMERAL_RPC_URL, { commitment: 'confirmed' })
+        ? new Connection(config.EPHEMERAL_RPC_URL, {
+            commitment: 'confirmed',
+            wsEndpoint: config.EPHEMERAL_WS_URL,
+          })
         : connection
 
       try {
@@ -286,6 +289,22 @@ export function RoundDetailPage() {
       }
 
       console.log('Transaction sent:', sig)
+
+      try {
+        const confirmConn = isRoundDelegated
+          ? new Connection(config.EPHEMERAL_RPC_URL, {
+              commitment: 'confirmed',
+              wsEndpoint: config.EPHEMERAL_WS_URL,
+            })
+          : connection;
+        const confirmation = await confirmConn.confirmTransaction(sig, 'confirmed');
+        if (confirmation?.value?.err) {
+          throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
+        }
+      } catch (confirmErr: any) {
+        console.error('Transaction confirmation failed:', confirmErr);
+        setStatus(confirmErr?.message || 'Transaction confirmation failed, verifying via backend...');
+      }
 
       confirmingRef.current = true
       lastConfirmedSigRef.current = sig
