@@ -28,5 +28,21 @@ export class AnalyticsController {
     const data = await analyticsService.getTimeSeries(d, g);
     return success(reply, data);
   });
+
+  getMarketHealth = asyncHandler(async (_request: FastifyRequest, reply: FastifyReply) => {
+    const data = await analyticsService.getMarketHealth();
+    return success(reply, data);
+  });
+
+  getTrendingMarkets = asyncHandler(async (request: FastifyRequest, reply: FastifyReply) => {
+    const { limit = 10 } = (request.query as any) || {};
+    const data = await analyticsService.getTrendingMarkets(Number(limit));
+    return success(reply, data);
+  });
+
+  getRoundPerformanceMetrics = asyncHandler(async (_request: FastifyRequest, reply: FastifyReply) => {
+    const data = await analyticsService.getRoundPerformanceMetrics();
+    return success(reply, data);
+  });
 }
 

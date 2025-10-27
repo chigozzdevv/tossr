@@ -8,11 +8,11 @@ export interface IUser extends Document {
 }
 
 const userSchema = new Schema<IUser>({
-  walletAddress: { 
-    type: String, 
-    required: true, 
+  walletAddress: {
+    type: String,
+    required: true,
     unique: true,
-    lowercase: true
+    trim: true,
   },
 }, {
   timestamps: true,

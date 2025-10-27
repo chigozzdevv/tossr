@@ -27,6 +27,15 @@ export type BetRecord = {
   }
 }
 
+type BetTxResponse = {
+  transaction: string
+  betPda: string
+  message: string
+  vaultPda?: string
+  needsVaultAta?: boolean
+  mint?: string
+}
+
 export const betsService = {
   async list(params: { status?: string; marketId?: string; page?: number; limit?: number } = {}) {
     const searchParams = new URLSearchParams()
@@ -47,7 +56,7 @@ export const betsService = {
   },
 
   async createTransaction(params: { roundId: string; selection: any; stake: number }) {
-    const response = await api.post<ApiSuccess<{ transaction: string; betPda: string; message: string }>>(
+    const response = await api.post<ApiSuccess<BetTxResponse>>(
       '/bets/place',
       params
     )
@@ -61,7 +70,7 @@ export const betsService = {
     txSignature: string
     betPda: string
   }) {
-    const response = await api.post<ApiSuccess<any>>('/bets/confirm', params)
+    const response = await api.post<ApiSuccess<any>>('/bets/confirm', params, { timeoutMs: 120000 } as any)
     return response.data
   },
 }

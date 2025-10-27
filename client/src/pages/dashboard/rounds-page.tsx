@@ -4,6 +4,7 @@ import { roundsService, type Round } from '@/services/rounds.service'
 import { buildRoundOptions, humanizeMarketType } from './round-utils'
 import { TrendChart } from '@/components/dashboard/trend-chart'
 import { CountdownTimer } from '@/components/dashboard/countdown-timer'
+import { RollingDice } from '@/components/dashboard/rolling-dice'
 
 type RoundSelectionEntry = {
   id: string
@@ -170,6 +171,24 @@ export function RoundsPage() {
     return entries.filter(selected?.predicate ?? (() => true))
   }, [activeFilter, entries, filters])
 
+  const startingSoonRounds = useMemo(() => {
+    const now = Date.now()
+    const twoMinutesMs = 2 * 60 * 1000
+
+    const queued = rounds.filter((round) => round.status === 'QUEUED')
+    console.log('All rounds:', rounds.length, 'Queued rounds:', queued.length)
+
+    return rounds.filter((round) => {
+      if (round.status !== 'QUEUED') return false
+      if (!round.scheduledReleaseAt) return false
+
+      const scheduledTime = new Date(round.scheduledReleaseAt).getTime()
+      const timeUntilStart = scheduledTime - now
+
+      return timeUntilStart > 0 && timeUntilStart <= twoMinutesMs
+    })
+  }, [rounds])
+
   if (loading) {
     return <div className="dashboard-panel">Loading live rounds…</div>
   }
@@ -201,6 +220,40 @@ export function RoundsPage() {
           </button>
         ))}
       </div>
+
+      {startingSoonRounds.length > 0 && (
+        <div className="starting-soon-section">
+          <div className="starting-soon-header">
+            <RollingDice />
+            <h2 className="starting-soon-title">Starting Soon</h2>
+            <span className="starting-soon-subtitle">{startingSoonRounds.length} {startingSoonRounds.length === 1 ? 'round' : 'rounds'} about to begin</span>
+          </div>
+          <div className="starting-soon-grid">
+            {startingSoonRounds.map((round) => {
+              const scheduledTime = new Date(round.scheduledReleaseAt!).getTime()
+              const timeUntilStart = scheduledTime - Date.now()
+              const seconds = Math.floor(timeUntilStart / 1000)
+              const minutes = Math.floor(seconds / 60)
+              const remainingSeconds = seconds % 60
+
+              return (
+                <div key={round.id} className="starting-soon-card">
+                  <div className="starting-soon-card-header">
+                    <span className="dashboard-round-market-type">{humanizeMarketType(round.market.type)}</span>
+                    <div className="starting-soon-pulse"></div>
+                  </div>
+                  <h3 className="starting-soon-card-title">{round.market.name}</h3>
+                  <p className="dashboard-round-meta">Round #{round.roundNumber}</p>
+                  <div className="starting-soon-timer">
+                    <span className="starting-soon-time">{minutes}:{remainingSeconds.toString().padStart(2, '0')}</span>
+                    <span className="starting-soon-label">until start</span>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
 
       {filteredEntries.length === 0 ? (
         <div className="dashboard-empty">No bets match this filter right now.</div>

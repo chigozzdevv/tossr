@@ -67,4 +67,24 @@ export class RoundsController {
       return badRequest(reply, error.message);
     }
   }
+
+  async getRoundAnalytics(req: FastifyRequest, reply: FastifyReply) {
+    try {
+      const { roundId } = req.params as { roundId: string };
+      const analytics = await roundsService.getRoundAnalytics(roundId);
+      return success(reply, analytics);
+    } catch (error: any) {
+      return badRequest(reply, error.message);
+    }
+  }
+
+  async getProbabilityHistory(req: FastifyRequest, reply: FastifyReply) {
+    try {
+      const { roundId } = req.params as { roundId: string };
+      const history = await roundsService.getProbabilityHistory(roundId);
+      return success(reply, history);
+    } catch (error: any) {
+      return badRequest(reply, error.message);
+    }
+  }
 }

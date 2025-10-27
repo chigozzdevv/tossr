@@ -1,14 +1,16 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useParams } from 'react-router-dom'
 import { roundsService, type Round } from '@/services/rounds.service'
 import { betsService } from '@/services/bets.service'
 import { useWallet, useConnection } from '@solana/wallet-adapter-react'
-import { Transaction, VersionedTransaction } from '@solana/web3.js'
+import { Connection, PublicKey, SystemProgram, Transaction, VersionedTransaction } from '@solana/web3.js'
+import { getAssociatedTokenAddress, createAssociatedTokenAccountInstruction, createSyncNativeInstruction } from '@solana/spl-token'
+import { api } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { buildRoundOptions, humanizeMarketType } from './round-utils'
-import { SelectionChart } from '@/components/dashboard/selection-chart'
 import { ProbabilityChart } from '@/components/dashboard/probability-chart'
 import { CountdownTimer } from '@/components/dashboard/countdown-timer'
+import { config } from '@/config/env'
 
 type SelectionState = Record<string, any>
 
@@ -74,15 +76,23 @@ export function RoundDetailPage() {
   const [selectedOptionId, setSelectedOptionId] = useState('')
   const [status, setStatus] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const [showAllOptions, setShowAllOptions] = useState(false)
+  type ProbabilitySnapshot = { timestamp: string; probabilities: { selection: any; probability: number; bets: number }[] }
+  type ApiSuccess<T> = { success: boolean; data: T }
+  const [probabilityHistory, setProbabilityHistory] = useState<ProbabilitySnapshot[]>([])
   const wallet = useWallet()
   const { connection } = useConnection()
+  const lastConfirmedSigRef = useRef<string>('')
+  const confirmingRef = useRef<boolean>(false)
 
   useEffect(() => {
     async function load() {
       if (!roundId) return
       try {
-        const data = await roundsService.getRound(roundId)
-        setRound(data)
+        const roundData = await roundsService.getRound(roundId)
+        setRound(roundData)
+        const historyRes = await api.get<ApiSuccess<ProbabilitySnapshot[]>>(`/rounds/${roundId}/probability-history`).catch(() => ({ success: true, data: [] } as ApiSuccess<ProbabilitySnapshot[]>))
+        setProbabilityHistory((historyRes as ApiSuccess<ProbabilitySnapshot[]>).data)
       } catch (err) {
         console.error(err)
         setError('Unable to load round')
@@ -136,55 +146,32 @@ export function RoundDetailPage() {
     return new Date(opened + ROUND_DURATION_MS)
   }, [round, ROUND_DURATION_MS])
 
-  const selectionChartData = useMemo(() => {
-    if (!round || options.length === 0) return []
-    const totalBets = round._count?.bets ?? 0
-
-    const colors = ['#62df98', '#4169e1', '#a855f7', '#ec4899', '#f59e0b', '#34d399']
-
-    if (totalBets === 0) {
-      return options.map((option, idx) => ({
-        name: option.label.length > 15 ? option.label.substring(0, 15) + '...' : option.label,
-        bets: 0,
-        percentage: 0,
-        color: colors[idx % colors.length]
-      }))
-    }
-
-    const betsPerOption = Math.floor(totalBets / options.length)
-    const remainder = totalBets % options.length
-
-    return options.map((option, idx) => {
-      const bets = betsPerOption + (idx < remainder ? 1 : 0)
-      const percentage = Math.round((bets / totalBets) * 100)
-      return {
-        name: option.label.length > 15 ? option.label.substring(0, 15) + '...' : option.label,
-        bets,
-        percentage,
-        color: colors[idx % colors.length]
-      }
-    })
-  }, [round, options])
-
-  // Generate probability trend data (simulated for now - you can enhance with real historical data)
   const probabilityData = useMemo(() => {
     if (!selectedOption || !round) return []
 
-    // Simulate historical probability trend
+    if (probabilityHistory.length > 0) {
+      const key = JSON.stringify(selectedOption.selection)
+      return probabilityHistory.map((snap) => {
+        const match = snap.probabilities.find(p => p.selection === key || JSON.stringify(p.selection) === key)
+        return {
+          time: new Date(snap.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          percentage: Math.round(((match?.probability ?? 0) + Number.EPSILON) * 100) / 100,
+        }
+      })
+    }
+
     const now = Date.now()
     const openedAt = round.openedAt ? new Date(round.openedAt).getTime() : now
     const duration = now - openedAt
-    const points = Math.min(12, Math.max(6, Math.floor(duration / 60000))) // 1 point per minute
+    const points = Math.min(12, Math.max(6, Math.floor(duration / 60000)))
 
     const data = []
     const currentPercentage = selectedOption ? (selectedOption.odds > 0 ? Math.min(95, (1 / selectedOption.odds) * 100) : 50) : 50
 
     for (let i = 0; i < points; i++) {
       const timeOffset = (duration / points) * i
-      const time = new Date(openedAt + timeOffset)
       const minutes = Math.floor(timeOffset / 60000)
 
-      // Simulate some variance
       const variance = Math.sin(i * 0.8) * 5
       const percentage = Math.max(5, Math.min(95, currentPercentage + variance - (points - i) * 2))
 
@@ -195,11 +182,11 @@ export function RoundDetailPage() {
     }
 
     return data
-  }, [selectedOption, round])
+  }, [probabilityHistory, selectedOption, round])
 
   const totalVolume = useMemo(() => {
     if (!round?.bets) return 0
-    return round.bets.reduce((sum, bet) => sum + (bet.stake || 0), 0) / 1_000_000_000 // Convert lamports to SOL
+    return round.bets.reduce((sum, bet) => sum + Number(bet.stake || 0), 0) / 1_000_000_000
   }, [round])
 
 
@@ -213,6 +200,7 @@ export function RoundDetailPage() {
   const showPatternSelect = selectedOption?.selection?.type === 'pattern'
 
   const handleBet = useCallback(async () => {
+    if (submitting || confirmingRef.current) return
     if (!round || !roundId) return
     if (!wallet.connected || !wallet.publicKey) {
       setStatus('Connect your wallet first')
@@ -234,34 +222,97 @@ export function RoundDetailPage() {
         stake: lamports,
       })
 
+      // If round is delegated to ER and mint is WSOL, ensure user's WSOL ATA is funded on base before bet
+      const wsolMint = 'So11111111111111111111111111111111111111112'
+      const mintAddr = (round.market as any)?.config?.mintAddress as string | undefined
+      if (round.delegateTxHash && !round.undelegateTxHash && mintAddr === wsolMint) {
+        const wsol = new PublicKey(wsolMint)
+        const ata = await getAssociatedTokenAddress(wsol, wallet.publicKey!, false)
+        const ataInfo = await connection.getAccountInfo(ata)
+        const prep = new Transaction()
+        if (!ataInfo) {
+          prep.add(createAssociatedTokenAccountInstruction(wallet.publicKey!, ata, wallet.publicKey!, wsol))
+        }
+        prep.add(SystemProgram.transfer({ fromPubkey: wallet.publicKey!, toPubkey: ata, lamports: lamports }))
+        prep.add(createSyncNativeInstruction(ata))
+        await wallet.sendTransaction(prep, connection, { skipPreflight: true, preflightCommitment: 'confirmed' })
+      }
+
+      // If server indicates vault ATA missing, create it on base before ER bet
+      if (round.delegateTxHash && !round.undelegateTxHash && (transactionPayload as any)?.needsVaultAta && (transactionPayload as any)?.vaultPda && mintAddr) {
+        try {
+          const mintPk = new PublicKey(mintAddr)
+          const vaultPda = new PublicKey((transactionPayload as any).vaultPda)
+          const vaultAta = await getAssociatedTokenAddress(mintPk, vaultPda, true)
+          const info = await connection.getAccountInfo(vaultAta)
+          if (!info) {
+            const tx = new Transaction().add(
+              createAssociatedTokenAccountInstruction(wallet.publicKey!, vaultAta, vaultPda, mintPk)
+            )
+            await wallet.sendTransaction(tx, connection, { skipPreflight: true, preflightCommitment: 'confirmed' })
+          }
+        } catch (e) {
+          console.warn('Vault ATA prep failed (will rely on existing account):', e)
+        }
+      }
+
       const txBytes = base64ToBytes(transactionPayload.transaction)
-      let signature: string
+      let sig: string
+
+      const isRoundDelegated = round.delegateTxHash && !round.undelegateTxHash
+      const sendConn = isRoundDelegated
+        ? new Connection(config.EPHEMERAL_RPC_URL, { commitment: 'confirmed' })
+        : connection
+
+      try {
+        const baseBalance = await connection.getBalance(wallet.publicKey!)
+        console.log('Wallet balance (base devnet):', baseBalance / 1_000_000_000, 'SOL')
+      } catch {}
+
+      console.log('Sending transaction to:', isRoundDelegated ? 'Magic Router (ER)' : 'Solana Base')
 
       try {
         const tx = Transaction.from(txBytes)
-        signature = await wallet.sendTransaction(tx, connection)
+        sig = await wallet.sendTransaction(tx, sendConn, {
+          skipPreflight: true,
+          preflightCommitment: 'confirmed'
+        })
       } catch {
         const vtx = VersionedTransaction.deserialize(txBytes)
-        signature = await wallet.sendTransaction(vtx, connection)
+        sig = await wallet.sendTransaction(vtx, sendConn, {
+          skipPreflight: true,
+          preflightCommitment: 'confirmed'
+        })
       }
 
-      await connection.confirmTransaction(signature, 'confirmed')
+      console.log('Transaction sent:', sig)
+
+      confirmingRef.current = true
+      lastConfirmedSigRef.current = sig
+
       await betsService.confirmBet({
         roundId,
         selection: payloadSelection,
         stake: lamports,
-        txSignature: signature,
+        txSignature: sig,
         betPda: transactionPayload.betPda,
       })
-      setStatus(`Bet confirmed: ${signature}`)
+      setStatus(`Bet confirmed: ${sig}`)
     } catch (err: any) {
-      console.error(err)
+      console.error('Bet placement error:', err)
+      console.error('Error details:', {
+        message: err?.message,
+        name: err?.name,
+        logs: err?.logs,
+        code: err?.code
+      })
       const msg = typeof err?.message === 'string' ? err.message : 'Failed to place bet'
       setStatus(msg)
     } finally {
+      confirmingRef.current = false
       setSubmitting(false)
     }
-  }, [connection, round, roundId, selection, stake, wallet])
+  }, [connection, round, roundId, selection, stake, submitting, wallet])
 
   if (loading) {
     return <div className="dashboard-panel">Loading round…</div>
@@ -342,42 +393,15 @@ export function RoundDetailPage() {
           </div>
         )}
 
-        {selectionChartData.length > 0 && (
-          <div className="selection-chart-container">
-            <div className="selection-chart-header">
-              <div>
-                <h3 className="selection-chart-title">Selection Distribution</h3>
-                <span className="selection-chart-subtitle">Bet distribution across all options</span>
-              </div>
-            </div>
-            <SelectionChart data={selectionChartData} height={200} variant="bar" />
-          </div>
-        )}
       </section>
 
       <aside className="card dashboard-round-sidebar">
-        <h3 className="dashboard-panel-title">Predict</h3>
-        <label className="dashboard-form" style={{ display: 'block' }}>
-          <span>Choose option</span>
-          <select
-            value={selectedOptionId}
-            onChange={(e) => {
-              const id = e.target.value
-              setSelectedOptionId(id)
-              const opt = options.find((o) => o.id === id)
-              if (opt) setSelection(cloneSelection(opt.selection))
-            }}
-          >
-            {options.map((option, index) => (
-              <option key={option.id} value={option.id}>
-                #{index + 1} · {option.label} · {option.odds.toFixed(option.odds >= 10 ? 1 : 2)}x{option.coverage ? ` · ${option.coverage}` : ''}
-              </option>
-            ))}
-          </select>
-        </label>
+        <h3 className="dashboard-panel-title">Place Bet</h3>
+
         <div className="dashboard-round-options">
-          <div className="dashboard-round-option-grid">
-            {options.map((option, index) => {
+          <span className="dashboard-round-stat-label" style={{ marginBottom: '0.5rem', display: 'block' }}>Select Outcome</span>
+          <div className="dashboard-round-option-grid" style={{ maxHeight: showAllOptions || options.length <= 4 ? 'none' : '320px', overflow: 'hidden', position: 'relative' }}>
+            {(showAllOptions ? options : options.slice(0, 4)).map((option) => {
               const active = option.id === selectedOptionId
               return (
                 <button
@@ -388,7 +412,6 @@ export function RoundDetailPage() {
                     setSelection(cloneSelection(option.selection))
                   }}
                 >
-                  <span className="dashboard-round-option-rank">#{index + 1}</span>
                   <div className="dashboard-round-option-body">
                     <strong>{option.label}</strong>
                     {option.coverage ? <span>{option.coverage}</span> : null}
@@ -398,6 +421,42 @@ export function RoundDetailPage() {
               )
             })}
           </div>
+          {options.length > 4 && (
+            <button
+              onClick={() => setShowAllOptions(!showAllOptions)}
+              style={{
+                width: '100%',
+                marginTop: '0.75rem',
+                padding: '0.65rem',
+                background: 'transparent',
+                border: '1px solid var(--border)',
+                borderRadius: '10px',
+                color: 'var(--text)',
+                fontSize: '0.85rem',
+                fontWeight: 600,
+                cursor: 'pointer',
+                transition: 'all 0.2s ease',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '0.5rem'
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = 'rgba(185,246,201,0.08)'
+                e.currentTarget.style.borderColor = 'rgba(185,246,201,0.3)'
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = 'transparent'
+                e.currentTarget.style.borderColor = 'var(--border)'
+              }}
+            >
+              {showAllOptions ? (
+                <>Show Less <span style={{ fontSize: '0.7rem' }}>▲</span></>
+              ) : (
+                <>Show {options.length - 4} More Options <span style={{ fontSize: '0.7rem' }}>▼</span></>
+              )}
+            </button>
+          )}
         </div>
         
         {selectedOption && (

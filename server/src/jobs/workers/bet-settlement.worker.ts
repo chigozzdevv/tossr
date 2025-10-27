@@ -73,16 +73,31 @@ async function processBetSettlementJob(job: Job<SettleBetsJobData>) {
     logger.error({ roundId, err: e }, 'On-chain round settle failed');
   }
 
-  try {
-    const undelegateTxHash = await tossrProgram.commitAndUndelegateRound(
-      marketPubkey,
-      round.roundNumber,
-      adminKeypair
-    );
-    await Round.updateOne({ _id: roundId }, { $set: { undelegateTxHash, settledAt: new Date() } });
-    logger.info({ roundId, undelegateTxHash }, 'Round committed and undelegated');
-  } catch (e) {
-    logger.error({ roundId, err: e }, 'Commit and undelegate failed');
+  const maxUndelegateAttempts = 3;
+  let undelegated = false;
+
+  for (let attempt = 0; attempt < maxUndelegateAttempts && !undelegated; attempt++) {
+    try {
+      if (attempt > 0) {
+        await new Promise(r => setTimeout(r, 2000 * attempt));
+      }
+
+      const undelegateTxHash = await tossrProgram.commitAndUndelegateRound(
+        marketPubkey,
+        round.roundNumber,
+        adminKeypair
+      );
+      await Round.updateOne({ _id: roundId }, { $set: { undelegateTxHash, settledAt: new Date() } });
+      logger.info({ roundId, undelegateTxHash, attempt }, 'Round committed and undelegated');
+      undelegated = true;
+    } catch (e) {
+      logger.error({ roundId, err: e, attempt, maxUndelegateAttempts }, `Commit and undelegate failed (attempt ${attempt + 1}/${maxUndelegateAttempts})`);
+
+      if (attempt === maxUndelegateAttempts - 1) {
+        await Round.updateOne({ _id: roundId }, { $set: { settledAt: new Date() } });
+        logger.error({ roundId }, 'CRITICAL: Round failed to undelegate after all retries');
+      }
+    }
   }
 
   logger.info({ roundId }, 'All bets settled for round');

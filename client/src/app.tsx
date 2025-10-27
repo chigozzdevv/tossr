@@ -11,6 +11,8 @@ import {
   ProfilePage,
   SettingsPage,
   RoundDetailPage,
+  CommunityPage,
+  LeaderboardPage,
 } from './pages/dashboard'
 import { useAuth } from './providers/auth-provider'
 
@@ -56,6 +58,8 @@ function AnimatedRoutes() {
           <Route path="markets/:marketId" element={<MarketDetailPage />} />
           <Route path="bets" element={<BetsPage />} />
           <Route path="history" element={<HistoryPage />} />
+          <Route path="leaderboard" element={<LeaderboardPage />} />
+          <Route path="community" element={<CommunityPage />} />
           <Route path="profile" element={<ProfilePage />} />
           <Route path="settings" element={<SettingsPage />} />
         </Route>

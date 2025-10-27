@@ -101,4 +101,42 @@ export async function roundsRoutes(fastify: FastifyInstance) {
     },
     roundsController.getActiveRounds.bind(roundsController)
   );
+
+  fastify.get(
+    '/:roundId/analytics',
+    {
+      schema: {
+        tags: ['Rounds'],
+        summary: 'Get round analytics',
+        description: 'Get detailed analytics for a specific round including volume, bets, timeline, and trends',
+        params: {
+          type: 'object',
+          properties: {
+            roundId: { type: 'string' },
+          },
+          required: ['roundId'],
+        },
+      },
+    },
+    roundsController.getRoundAnalytics.bind(roundsController)
+  );
+
+  fastify.get(
+    '/:roundId/probability-history',
+    {
+      schema: {
+        tags: ['Rounds'],
+        summary: 'Get probability history',
+        description: 'Get historical probability distribution for all selections in a round over time',
+        params: {
+          type: 'object',
+          properties: {
+            roundId: { type: 'string' },
+          },
+          required: ['roundId'],
+        },
+      },
+    },
+    roundsController.getProbabilityHistory.bind(roundsController)
+  );
 }

@@ -9,7 +9,10 @@ import {
 import {
   TOKEN_PROGRAM_ID,
   getAssociatedTokenAddress,
-  ASSOCIATED_TOKEN_PROGRAM_ID
+  ASSOCIATED_TOKEN_PROGRAM_ID,
+  createAssociatedTokenAccountInstruction,
+  createSyncNativeInstruction,
+  NATIVE_MINT,
 } from '@solana/spl-token';
 import {
   MAGIC_CONTEXT_ID as SDK_MAGIC_CONTEXT_ID,
@@ -81,7 +84,8 @@ export class TossrProgramService {
     roundNumber: number,
     selection: { kind: number; a: number; b: number; c: number },
     stakeAmount: number,
-    mint: PublicKey
+    mint: PublicKey,
+    opts?: { useER?: boolean }
   ): Promise<{ transaction: Transaction; betPda: PublicKey }> {
     const roundNumberBuffer = Buffer.alloc(8);
     roundNumberBuffer.writeBigUInt64LE(BigInt(roundNumber));
@@ -145,8 +149,87 @@ export class TossrProgramService {
       data: placeBetData,
     });
 
-    const transaction = new Transaction().add(instruction);
-    const { blockhash } = await this.connection.getLatestBlockhash();
+    const ixs: TransactionInstruction[] = [];
+
+    const [userAtaInfo, vaultAtaInfo] = await Promise.all([
+      this.connection.getAccountInfo(userTokenAccount),
+      this.connection.getAccountInfo(vaultTokenAccount),
+    ]);
+
+    if (!opts?.useER) {
+      if (!userAtaInfo) {
+        ixs.push(
+          createAssociatedTokenAccountInstruction(
+            userPublicKey,
+            userTokenAccount,
+            userPublicKey,
+            mint,
+            TOKEN_PROGRAM_ID,
+            ASSOCIATED_TOKEN_PROGRAM_ID,
+          )
+        );
+      }
+
+      if (!vaultAtaInfo) {
+        ixs.push(
+          createAssociatedTokenAccountInstruction(
+            userPublicKey,
+            vaultTokenAccount,
+            vaultPda,
+            mint,
+            TOKEN_PROGRAM_ID,
+            ASSOCIATED_TOKEN_PROGRAM_ID,
+          )
+        );
+      }
+
+      const isNative = mint.equals(NATIVE_MINT);
+      if (isNative) {
+        ixs.push(
+          SystemProgram.transfer({ fromPubkey: userPublicKey, toPubkey: userTokenAccount, lamports: stakeAmount })
+        );
+        ixs.push(createSyncNativeInstruction(userTokenAccount));
+      }
+    }
+
+    const transaction = new Transaction().add(...ixs, instruction);
+    const provider = opts?.useER ? this.erConnection : this.connection;
+
+    const maxAttempts = 5;
+    let blockhash: string | undefined;
+    let lastError: unknown;
+    let triedFallback = false;
+    let currentProvider = provider;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        const result = await currentProvider.getLatestBlockhash();
+        blockhash = result.blockhash;
+        break;
+      } catch (e: any) {
+        lastError = e;
+        const msg = String(e?.message || '');
+
+        if (!triedFallback && opts?.useER && (msg.includes('fetch failed') || msg.includes('403') || msg.includes('UND_ERR_CONNECT_TIMEOUT'))) {
+          currentProvider = this.connection;
+          triedFallback = true;
+          logger.warn({ attempt }, 'Ephemeral RPC failed, falling back to Syndica RPC for blockhash');
+          continue;
+        }
+
+        if (msg.includes('fetch failed') || msg.includes('UND_ERR_CONNECT_TIMEOUT')) {
+          await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+          continue;
+        }
+        throw e;
+      }
+    }
+
+    if (!blockhash) {
+      logger.error({ lastError, useER: opts?.useER }, 'Failed to get blockhash after all retries');
+      throw lastError || new Error('Failed to get recent blockhash');
+    }
+
     transaction.recentBlockhash = blockhash;
     transaction.feePayer = userPublicKey;
 
@@ -309,11 +392,12 @@ export class TossrProgramService {
   async lockRound(
     marketId: PublicKey,
     roundNumber: number,
-    adminKeypair: Keypair
+    adminKeypair: Keypair,
+    opts?: { useER?: boolean }
   ): Promise<string> {
     const roundNumberBuffer = Buffer.alloc(8);
     roundNumberBuffer.writeBigUInt64LE(BigInt(roundNumber));
-    
+
     const [roundPda] = PublicKey.findProgramAddressSync(
       [ROUND_SEED, marketId.toBuffer(), roundNumberBuffer],
       TOSSR_PROGRAM_ID
@@ -323,7 +407,7 @@ export class TossrProgramService {
 
     const instruction = new TransactionInstruction({
       keys: [
-        { pubkey: adminKeypair.publicKey, isSigner: true, isWritable: false },
+        { pubkey: adminKeypair.publicKey, isSigner: true, isWritable: true },
         { pubkey: marketId, isSigner: false, isWritable: false },
         { pubkey: roundPda, isSigner: false, isWritable: true },
       ],
@@ -331,20 +415,49 @@ export class TossrProgramService {
       data: lockRoundData,
     });
 
-    const transaction = new Transaction().add(instruction);
-    const { blockhash } = await this.connection.getLatestBlockhash();
-    transaction.recentBlockhash = blockhash;
-    transaction.feePayer = adminKeypair.publicKey;
+    const provider = opts?.useER ? this.erConnection : this.connection;
 
-    const signature = await this.connection.sendTransaction(
-      transaction,
-      [adminKeypair],
-      { skipPreflight: false }
-    );
+    const maxAttempts = 5;
+    let signature: string | undefined;
+    let lastError: unknown;
+    let triedFallback = false;
+    let currentProvider = provider;
 
-    await this.connection.confirmTransaction(signature, 'finalized');
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        const tx = new Transaction().add(instruction);
+        const { blockhash } = await currentProvider.getLatestBlockhash();
+        tx.recentBlockhash = blockhash;
+        tx.feePayer = adminKeypair.publicKey;
+        const sig = await currentProvider.sendTransaction(tx, [adminKeypair], { skipPreflight: false });
+        await currentProvider.confirmTransaction(sig, 'finalized');
+        signature = sig;
+        break;
+      } catch (e: any) {
+        lastError = e;
+        const msg = String(e?.message || '');
 
-    logger.info({ signature, roundPda: roundPda.toString() }, 'Round locked on-chain');
+        if (!triedFallback && opts?.useER && (msg.includes('Blockhash not found') || msg.includes('fetch failed') || msg.includes('403') || msg.includes('UND_ERR_CONNECT_TIMEOUT'))) {
+          currentProvider = this.connection;
+          triedFallback = true;
+          logger.warn({ attempt, roundNumber }, 'Ephemeral RPC failed for lock, falling back to Syndica RPC for blockhash');
+          continue;
+        }
+
+        if (msg.includes('Blockhash not found') || msg.includes('fetch failed') || msg.includes('UND_ERR_CONNECT_TIMEOUT')) {
+          await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+          continue;
+        }
+        throw e;
+      }
+    }
+
+    if (!signature) {
+      logger.error({ lastError, useER: opts?.useER, roundNumber }, 'Failed to lock round after all retries');
+      throw lastError || new Error('Failed to lock round');
+    }
+
+    logger.info({ signature, roundPda: roundPda.toString(), useER: opts?.useER }, 'Round locked on-chain');
 
     return signature;
   }
@@ -863,13 +976,40 @@ export class TossrProgramService {
       { pubkey: MAGIC_CONTEXT_PK, isSigner: false, isWritable: true },
     ];
     const ix = new TransactionInstruction({ keys, programId: TOSSR_PROGRAM_ID, data: DISCRIMINATORS.COMMIT_AND_UNDELEGATE_ROUND });
-    const tx = new Transaction().add(ix);
-    const { blockhash } = await this.erConnection.getLatestBlockhash();
-    tx.recentBlockhash = blockhash;
-    tx.feePayer = payer.publicKey;
-    const sig = await this.erConnection.sendTransaction(tx, [payer], { skipPreflight: false });
-    await this.erConnection.confirmTransaction(sig);
-    return sig;
+
+    const maxAttempts = 5;
+    let signature: string | undefined;
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        const tx = new Transaction().add(ix);
+        const { blockhash } = await this.erConnection.getLatestBlockhash();
+        tx.recentBlockhash = blockhash;
+        tx.feePayer = payer.publicKey;
+        const sig = await this.erConnection.sendTransaction(tx, [payer], { skipPreflight: false });
+        await this.erConnection.confirmTransaction(sig);
+        signature = sig;
+        break;
+      } catch (e: any) {
+        lastError = e;
+        const msg = String(e?.message || '');
+
+        if (msg.includes('Blockhash not found') || msg.includes('fetch failed') || msg.includes('UND_ERR_CONNECT_TIMEOUT') || msg.includes('403')) {
+          logger.warn({ attempt, roundNumber, error: msg }, 'ER transaction failed, retrying with Magic Router');
+          await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+          continue;
+        }
+        throw e;
+      }
+    }
+
+    if (!signature) {
+      logger.error({ lastError, roundNumber }, 'Failed to commit/undelegate round after all retries');
+      throw lastError || new Error('Failed to commit and undelegate round');
+    }
+
+    return signature;
   }
 
   async revealEntropyOutcome(
@@ -1148,16 +1288,37 @@ export class TossrProgramService {
       data,
     });
 
-    const transaction = new Transaction().add(instruction);
-    const { blockhash } = await this.erConnection.getLatestBlockhash();
-    transaction.recentBlockhash = blockhash;
-    transaction.feePayer = payer.publicKey;
+    const maxAttempts = 5;
+    let signature: string | undefined;
+    let lastError: unknown;
 
-    const signature = await this.erConnection.sendTransaction(transaction, [payer], {
-      skipPreflight: false,
-    });
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        const transaction = new Transaction().add(instruction);
+        const { blockhash } = await this.erConnection.getLatestBlockhash();
+        transaction.recentBlockhash = blockhash;
+        transaction.feePayer = payer.publicKey;
+        const sig = await this.erConnection.sendTransaction(transaction, [payer], { skipPreflight: false });
+        await this.erConnection.confirmTransaction(sig);
+        signature = sig;
+        break;
+      } catch (e: any) {
+        lastError = e;
+        const msg = String(e?.message || '');
 
-    await this.erConnection.confirmTransaction(signature);
+        if (msg.includes('Blockhash not found') || msg.includes('fetch failed') || msg.includes('UND_ERR_CONNECT_TIMEOUT') || msg.includes('403')) {
+          logger.warn({ attempt, roundNumber, error: msg }, 'ER transaction failed, retrying with Magic Router');
+          await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+          continue;
+        }
+        throw e;
+      }
+    }
+
+    if (!signature) {
+      logger.error({ lastError, roundNumber }, 'Failed to commit state after all retries');
+      throw lastError || new Error('Failed to commit round state');
+    }
 
     logger.info({ signature, roundPda: roundPda.toString() }, 'Round state committed');
 
@@ -1193,16 +1354,37 @@ export class TossrProgramService {
       data,
     });
 
-    const transaction = new Transaction().add(instruction);
-    const { blockhash } = await this.erConnection.getLatestBlockhash();
-    transaction.recentBlockhash = blockhash;
-    transaction.feePayer = payer.publicKey;
+    const maxAttempts = 5;
+    let signature: string | undefined;
+    let lastError: unknown;
 
-    const signature = await this.erConnection.sendTransaction(transaction, [payer], {
-      skipPreflight: false,
-    });
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        const transaction = new Transaction().add(instruction);
+        const { blockhash} = await this.erConnection.getLatestBlockhash();
+        transaction.recentBlockhash = blockhash;
+        transaction.feePayer = payer.publicKey;
+        const sig = await this.erConnection.sendTransaction(transaction, [payer], { skipPreflight: false });
+        await this.erConnection.confirmTransaction(sig);
+        signature = sig;
+        break;
+      } catch (e: any) {
+        lastError = e;
+        const msg = String(e?.message || '');
 
-    await this.erConnection.confirmTransaction(signature);
+        if (msg.includes('Blockhash not found') || msg.includes('fetch failed') || msg.includes('UND_ERR_CONNECT_TIMEOUT') || msg.includes('403')) {
+          logger.warn({ attempt, roundNumber, error: msg }, 'ER transaction failed, retrying with Magic Router');
+          await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+          continue;
+        }
+        throw e;
+      }
+    }
+
+    if (!signature) {
+      logger.error({ lastError, roundNumber }, 'Failed to commit/undelegate round after all retries');
+      throw lastError || new Error('Failed to commit and undelegate round');
+    }
 
     logger.info({ signature, roundPda: roundPda.toString() }, 'Round committed and undelegated');
 

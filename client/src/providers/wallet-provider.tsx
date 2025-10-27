@@ -1,6 +1,5 @@
 import { createContext, useContext, useMemo, useState } from 'react'
 import { ConnectionProvider, WalletProvider } from '@solana/wallet-adapter-react'
-import { clusterApiUrl } from '@solana/web3.js'
 import {
   CoinbaseWalletAdapter,
   LedgerWalletAdapter,
@@ -10,6 +9,7 @@ import {
 } from '@solana/wallet-adapter-wallets'
 import { WalletAdapterNetwork } from '@solana/wallet-adapter-base'
 import { WalletModal } from '@/components/wallet/wallet-modal'
+import { config } from '@/config/env'
 import '@/components/wallet/wallet-modal.css'
 
 type WalletModalContextType = {
@@ -29,7 +29,7 @@ export function useWalletModal() {
 
 export function SolanaWalletProviders({ children }: { children: React.ReactNode }) {
   const [showWalletModal, setShowWalletModal] = useState(false)
-  const endpoint = useMemo(() => clusterApiUrl('devnet'), [])
+  const endpoint = useMemo(() => config.SOLANA_RPC_URL, [])
   const wallets = useMemo(
     () => [
       new PhantomWalletAdapter(),

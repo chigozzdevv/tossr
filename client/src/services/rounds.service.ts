@@ -16,6 +16,8 @@ export type Round = {
   scheduledReleaseAt?: string
   releaseGroupId?: string
   solanaAddress?: string
+  delegateTxHash?: string
+  undelegateTxHash?: string
   outcome?: any
   market: {
     id: string

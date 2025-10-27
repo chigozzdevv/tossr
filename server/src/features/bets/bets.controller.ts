@@ -4,6 +4,7 @@ import { LeaderboardEntry } from '@/config/database';
 import { success, paginated } from '@/utils/response';
 import { asyncHandler } from '@/utils/errors';
 import { requireAuth } from '@/features/auth';
+import { logger } from '@/utils/logger';
 
 const betsService = new BetsService();
 
@@ -42,6 +43,8 @@ export class BetsController {
       txSignature: string;
       betPda: string;
     };
+
+    logger.info({ userId: request.user.id, roundId, txSignature, betPda }, 'Confirm bet request');
 
     const bet = await betsService.confirmBet(
       request.user.id,

@@ -5,11 +5,49 @@ import { logger } from '@/utils/logger'
 import { config } from '@/config/env'
 
 const roundsService = new RoundsService()
-let running = false
+
+class SchedulerLock {
+  private running = false
+  private runningTimestamp: number | null = null
+  private readonly TIMEOUT_MS = 120000
+
+  async acquire(): Promise<boolean> {
+    if (this.running && this.runningTimestamp) {
+      const elapsed = Date.now() - this.runningTimestamp
+      if (elapsed > this.TIMEOUT_MS) {
+        logger.warn({ elapsed, timeout: this.TIMEOUT_MS }, 'Auto-open scheduler lock timeout, forcing release')
+        this.release()
+      } else {
+        return false
+      }
+    }
+
+    if (this.running) {
+      return false
+    }
+
+    this.running = true
+    this.runningTimestamp = Date.now()
+    return true
+  }
+
+  release(): void {
+    this.running = false
+    this.runningTimestamp = null
+  }
+
+  isRunning(): boolean {
+    return this.running
+  }
+}
+
+const schedulerLock = new SchedulerLock()
 
 export async function autoOpenRounds() {
-  if (running) return
-  running = true
+  if (!await schedulerLock.acquire()) {
+    return
+  }
+
   try {
     const markets = await Market.find({ isActive: true }).select('_id name').lean()
     if (markets.length === 0) return
@@ -66,6 +104,6 @@ export async function autoOpenRounds() {
   } catch (error) {
     logger.error({ error }, 'Auto-open scheduler error')
   } finally {
-    running = false
+    schedulerLock.release()
   }
 }

@@ -7,7 +7,10 @@ import { TossrProgramService } from '@/solana/tossr-program-service';
 import { logger } from '@/utils/logger';
 import { config } from '@/config/env';
 import { PublicKey, Connection } from '@solana/web3.js';
+import { getAssociatedTokenAddress } from '@solana/spl-token';
 import { getMarketConfig } from '@/utils/market-config';
+import bs58 from 'bs58';
+import { DISCRIMINATORS } from '@/utils/anchor-discriminators';
 
 const tossrProgram = new TossrProgramService();
 
@@ -40,11 +43,27 @@ export class BetsService {
 
     const marketConfig = getMarketConfig((round.marketId as any).config as unknown);
     const marketPubkey = new PublicKey(marketConfig.solanaAddress);
-    const userPubkey = new PublicKey(userWalletAddress);
+    let userPubkey: PublicKey;
+    try {
+      userPubkey = new PublicKey(userWalletAddress);
+    } catch (e) {
+      throw new ValidationError('Invalid wallet address in session; please reconnect your wallet');
+    }
     if (!marketConfig.mintAddress) throw new ValidationError('Missing mintAddress in market config');
     const mint = new PublicKey(marketConfig.mintAddress);
 
     const selectionEncoded = this.encodeSelection(selection, ((round.marketId as any).type) as MarketType);
+
+    // For ER rounds, check if vault ATA exists on base so client can prep it before sending ER tx
+    let needsVaultAta = false;
+    let vaultPda: PublicKey | null = null;
+    try {
+      vaultPda = await tossrProgram.getVaultPda(marketPubkey);
+      const vaultTokenAccount = await getAssociatedTokenAddress(mint, vaultPda, true);
+      const baseConn = new Connection(config.SOLANA_RPC_URL);
+      const info = await baseConn.getAccountInfo(vaultTokenAccount);
+      needsVaultAta = !info;
+    } catch {}
 
     const { transaction, betPda } = await tossrProgram.placeBet(
       userPubkey,
@@ -52,14 +71,22 @@ export class BetsService {
       round.roundNumber,
       selectionEncoded,
       stake,
-      mint
+      mint,
+      { useER: Boolean((round as any).delegateTxHash && !(round as any).undelegateTxHash) }
     );
 
     const serializedTransaction = transaction.serialize({ requireAllSignatures: false, verifySignatures: false });
 
     logger.info({ userId, roundId, stake, betPda: betPda.toString() }, 'Bet transaction created');
 
-    return { transaction: serializedTransaction.toString('base64'), betPda: betPda.toString(), message: 'Sign this transaction in your wallet to place bet' };
+    return {
+      transaction: serializedTransaction.toString('base64'),
+      betPda: betPda.toString(),
+      message: 'Sign this transaction in your wallet to place bet',
+      vaultPda: vaultPda ? vaultPda.toString() : undefined,
+      needsVaultAta,
+      mint: mint.toString(),
+    } as any;
   }
 
   async confirmBet(
@@ -71,11 +98,17 @@ export class BetsService {
     betPda: string
   ) {
     const cacheKey = `bet-confirm:${txSignature}`;
-    const existingBetId = await redis.get(cacheKey);
-    if (existingBetId) {
-      const existingBet = await Bet.findById(existingBetId).lean();
-      if (existingBet) {
-        return { ...existingBet, stake: Number(existingBet.stake), txSignature, betPda } as any;
+    const lockKey = `bet-confirm-lock:${txSignature}`;
+    const acquired = await (redis as any).set(lockKey, '1', 'NX', 'EX', 30);
+    if (!acquired) {
+      const duplicate = await Bet.findOne({ txSignature }).lean();
+      if (duplicate) return { ...duplicate, stake: Number(duplicate.stake), txSignature, betPda } as any;
+      const existingBetId = await redis.get(cacheKey);
+      if (existingBetId) {
+        const existingBet = await Bet.findById(existingBetId).lean();
+        if (existingBet) {
+          return { ...existingBet, stake: Number(existingBet.stake), txSignature, betPda } as any;
+        }
       }
     }
 
@@ -85,22 +118,124 @@ export class BetsService {
       throw new ConflictError('Round is no longer accepting bet confirmations');
     }
 
-    const connection = new Connection(config.SOLANA_RPC_URL);
-    const txResult = await connection.getTransaction(txSignature, { maxSupportedTransactionVersion: 0 });
-    if (!txResult || txResult.meta?.err) throw new ValidationError('Transaction not found or failed on-chain');
+    const isDelegated = Boolean((round as any).delegateTxHash && !(round as any).undelegateTxHash);
+    const routerConn = new Connection(config.EPHEMERAL_RPC_URL);
+    const baseConn = new Connection(config.SOLANA_RPC_URL);
+
+    const tryGetTx = async () => {
+      const conns = isDelegated ? [routerConn, baseConn] : [baseConn, routerConn];
+      for (const conn of conns) {
+        try {
+          const res = await conn.getTransaction(txSignature, { maxSupportedTransactionVersion: 0 });
+          if (res) return res;
+        } catch {
+        }
+      }
+      return null;
+    };
+
+    const checkSignatureStatus = async () => {
+      const conns = isDelegated ? [routerConn, baseConn] : [baseConn, routerConn];
+      for (const conn of conns) {
+        try {
+          const statuses = await conn.getSignatureStatuses([txSignature]);
+          if (statuses?.value?.[0]?.confirmationStatus && !statuses.value[0].err) {
+            return true;
+          }
+        } catch {
+        }
+      }
+      return false;
+    };
+
+    let txResult = await tryGetTx();
+    const deadline = Date.now() + 90000;
+    let lastStatusCheck = 0;
+
+    while (!txResult && Date.now() < deadline) {
+      const now = Date.now();
+
+      if (now - lastStatusCheck > 3000) {
+        const hasStatus = await checkSignatureStatus();
+        lastStatusCheck = now;
+
+        if (hasStatus) {
+          logger.info({ txSignature, roundId }, 'Transaction confirmed via signature status check');
+          break;
+        }
+      }
+
+      await new Promise((r) => setTimeout(r, 2000));
+      txResult = await tryGetTx();
+    }
+
+    if (!txResult) {
+      const finalStatusCheck = await checkSignatureStatus();
+      if (!finalStatusCheck) {
+        throw new ValidationError('Transaction not found on-chain after 90 seconds');
+      }
+    } else if (txResult.meta?.err) {
+      throw new ValidationError('Transaction failed on-chain');
+    }
+
+    // Parse on-chain instruction to get authoritative stake/selection
+    let finalStake = Number(stake);
+    let decodedFromTx: { kind: number; a: number; b: number; c: number } | null = null;
+    try {
+      if (txResult) {
+        const message: any = (txResult as any).transaction.message;
+        const instructions: any[] = message?.instructions || [];
+        for (const ix of instructions) {
+          if (!ix?.data) continue;
+          const raw: Uint8Array = typeof ix.data === 'string' ? bs58.decode(ix.data) : Buffer.from(ix.data);
+          if (raw.length >= 8 && Buffer.compare(Buffer.from(raw.subarray(0, 8)), DISCRIMINATORS.PLACE_BET) === 0) {
+            const stakeOffset = 8 + 1 + 2 + 2 + 2;
+            if (raw.length >= stakeOffset + 8) {
+              finalStake = Number(Buffer.from(raw.subarray(stakeOffset, stakeOffset + 8)).readBigUInt64LE(0));
+            }
+            if (raw.length >= 15) {
+              const kind = (raw[8] ?? 0);
+              const a = Buffer.from(raw.subarray(9, 11)).readUInt16LE(0);
+              const b = Buffer.from(raw.subarray(11, 13)).readUInt16LE(0);
+              const c = Buffer.from(raw.subarray(13, 15)).readUInt16LE(0);
+              decodedFromTx = { kind, a, b, c };
+            }
+            break;
+          }
+        }
+      }
+    } catch (e) {
+      logger.warn({ err: e, txSignature }, 'Failed to parse stake from transaction; using client-provided stake');
+    }
 
     const cfg = getMarketConfig((round.marketId as any).config as unknown) as any;
     const houseEdgeBps: number = typeof cfg?.houseEdgeBps === 'number' ? cfg.houseEdgeBps : 0;
 
-    const bet = await Bet.create({
-      userId,
-      roundId,
-      marketId: round.marketId,
-      selection,
-      stake,
-      odds: this.calculateOdds(selection, ((round.marketId as any).type) as MarketType, houseEdgeBps),
-      status: BetStatus.PENDING,
-    });
+    const marketType = ((round.marketId as any).type) as MarketType;
+    const selectionToUse = decodedFromTx ? this.decodeSelection(decodedFromTx, marketType) : selection;
+
+    let bet;
+    try {
+      bet = await Bet.create({
+        userId,
+        roundId,
+        marketId: round.marketId,
+        selection: selectionToUse,
+        stake: finalStake,
+        odds: this.calculateOdds(selectionToUse, marketType, houseEdgeBps),
+        status: BetStatus.PENDING,
+        txSignature,
+      });
+    } catch (err: any) {
+      if (err?.code === 11000) {
+        const existing = await Bet.findOne({ txSignature }).lean();
+        if (existing) {
+          await redis.set(cacheKey, (existing as any).id || (existing as any)._id.toString(), 'EX', 86400);
+          return { ...existing, stake: Number(existing.stake), txSignature, betPda } as any;
+        }
+      }
+      throw err;
+    }
 
     await redis.set(cacheKey, (bet as any).id || (bet as any)._id.toString(), 'EX', 86400);
     await redis.hset(
@@ -183,6 +318,34 @@ export class BetsService {
       }
       default:
         return fromEqualBins(2);
+    }
+  }
+
+  private decodeSelection(encoded: { kind: number; a: number; b: number; c: number }, marketType: MarketType): any {
+    switch (marketType) {
+      case MarketType.PICK_RANGE:
+        if (encoded.kind === 0) return { type: 'range', min: encoded.a, max: encoded.b };
+        return { type: 'single', value: encoded.a };
+      case MarketType.EVEN_ODD:
+        return { type: 'parity', value: encoded.a === 0 ? 'even' : 'odd' };
+      case MarketType.LAST_DIGIT:
+        return { type: 'digit', value: encoded.a };
+      case MarketType.MODULO_THREE:
+        return { type: 'modulo', value: encoded.a };
+      case MarketType.PATTERN_OF_DAY:
+        return { type: 'pattern', patternId: encoded.a };
+      case MarketType.SHAPE_COLOR:
+        return { type: 'shape', shape: encoded.a, color: encoded.b, size: encoded.c };
+      case MarketType.ENTROPY_BATTLE: {
+        const map = ['tee', 'chain', 'sensor'] as const;
+        return { type: 'entropy', source: map[encoded.a] ?? 'tee' };
+      }
+      case MarketType.STREAK_METER:
+        return { type: 'streak', target: encoded.a };
+      case MarketType.COMMUNITY_SEED:
+        return { type: 'community', byte: encoded.a };
+      default:
+        return {};
     }
   }
 

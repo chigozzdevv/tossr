@@ -1,5 +1,4 @@
 import { Bet, User, Round, Attestation, Market } from '@/config/database';
-import { config } from '@/config/env';
 
 type Granularity = 'daily' | 'weekly';
 
@@ -164,5 +163,133 @@ export class AnalyticsService {
   private async countActiveUsersSince(since: Date) {
     const distinct = await Bet.distinct('userId', { createdAt: { $gte: since } });
     return distinct.length;
+  }
+
+  async getMarketHealth() {
+    const markets = await Market.find({}).select('_id name type isActive').lean();
+
+    const marketHealth = await Promise.all(
+      markets.map(async (market: any) => {
+        const marketId = String(market._id);
+
+        const [activeRounds, totalRounds, settledRounds, recentBets] = await Promise.all([
+          Round.countDocuments({ marketId: market._id, status: 'PREDICTING' }),
+          Round.countDocuments({ marketId: market._id }),
+          Round.countDocuments({ marketId: market._id, status: 'SETTLED' }),
+          Bet.find({ marketId: market._id }).select('stake createdAt').lean()
+        ]);
+
+        const totalBets = recentBets.length;
+        const avgBetsPerRound = totalRounds > 0 ? totalBets / totalRounds : 0;
+
+        const now = Date.now();
+        const last24h = new Date(now - 24 * 60 * 60 * 1000);
+        const last7d = new Date(now - 7 * 24 * 60 * 60 * 1000);
+
+        const bets24h = recentBets.filter(b => b.createdAt >= last24h);
+        const bets7d = recentBets.filter(b => b.createdAt >= last7d);
+
+        const volume24h = bets24h.reduce((sum, bet) => sum + Number(bet.stake), 0);
+        const volume7d = bets7d.reduce((sum, bet) => sum + Number(bet.stake), 0);
+
+        const avgVolume7dPerDay = volume7d / 7;
+        const volumeGrowth = avgVolume7dPerDay > 0 ? ((volume24h - avgVolume7dPerDay) / avgVolume7dPerDay) * 100 : 0;
+
+        const settlementRate = totalRounds > 0 ? (settledRounds / totalRounds) * 100 : 0;
+
+        return {
+          marketId,
+          name: market.name,
+          type: market.type,
+          isActive: market.isActive,
+          activeRounds,
+          totalRounds,
+          avgBetsPerRound: Math.round(avgBetsPerRound * 100) / 100,
+          volume24h,
+          volumeGrowth: Math.round(volumeGrowth * 100) / 100,
+          settlementRate: Math.round(settlementRate * 100) / 100,
+          totalBets
+        };
+      })
+    );
+
+    return marketHealth;
+  }
+
+  async getTrendingMarkets(limit: number = 10) {
+    const markets = await Market.find({}).select('_id name type').lean();
+
+    const now = Date.now();
+    const last24h = new Date(now - 24 * 60 * 60 * 1000);
+    const last48h = new Date(now - 48 * 60 * 60 * 1000);
+
+    const marketStats = await Promise.all(
+      markets.map(async (market: any) => {
+        const marketId = String(market._id);
+
+        const [bets24h, bets48h, activeRounds] = await Promise.all([
+          Bet.find({ marketId: market._id, createdAt: { $gte: last24h } }).select('stake').lean(),
+          Bet.find({ marketId: market._id, createdAt: { $gte: last48h, $lt: last24h } }).select('stake').lean(),
+          Round.countDocuments({ marketId: market._id, status: 'PREDICTING' })
+        ]);
+
+        const volume24h = bets24h.reduce((sum, bet) => sum + Number(bet.stake), 0);
+        const volumePrevious24h = bets48h.reduce((sum, bet) => sum + Number(bet.stake), 0);
+
+        const volumeChange = volumePrevious24h > 0
+          ? ((volume24h - volumePrevious24h) / volumePrevious24h) * 100
+          : volume24h > 0 ? 100 : 0;
+
+        return {
+          marketId,
+          name: market.name,
+          type: market.type,
+          volume24h,
+          volumeChange: Math.round(volumeChange * 100) / 100,
+          activeRounds,
+          bets24h: bets24h.length
+        };
+      })
+    );
+
+    return marketStats
+      .sort((a, b) => b.volume24h - a.volume24h)
+      .slice(0, limit);
+  }
+
+  async getRoundPerformanceMetrics() {
+    const rounds = await Round.find({ status: 'SETTLED' })
+      .select('openedAt lockedAt revealedAt settledAt marketId')
+      .lean();
+
+    if (rounds.length === 0) {
+      return {
+        avgDuration: 0,
+        avgLockToReveal: 0,
+        avgRevealToSettle: 0,
+        totalSettled: 0
+      };
+    }
+
+    let totalDuration = 0;
+    let totalLockToReveal = 0;
+    let totalRevealToSettle = 0;
+    let validRounds = 0;
+
+    rounds.forEach((r: any) => {
+      if (r.openedAt && r.lockedAt && r.revealedAt && r.settledAt) {
+        totalDuration += new Date(r.settledAt).getTime() - new Date(r.openedAt).getTime();
+        totalLockToReveal += new Date(r.revealedAt).getTime() - new Date(r.lockedAt).getTime();
+        totalRevealToSettle += new Date(r.settledAt).getTime() - new Date(r.revealedAt).getTime();
+        validRounds++;
+      }
+    });
+
+    return {
+      avgDuration: validRounds > 0 ? Math.round(totalDuration / validRounds) : 0,
+      avgLockToReveal: validRounds > 0 ? Math.round(totalLockToReveal / validRounds) : 0,
+      avgRevealToSettle: validRounds > 0 ? Math.round(totalRevealToSettle / validRounds) : 0,
+      totalSettled: rounds.length
+    };
   }
 }

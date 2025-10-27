@@ -287,12 +287,15 @@ export class RoundsService {
     const marketConfig = getMarketConfig((round as any).marketId.config as unknown);
     const marketPubkey = new PublicKey(marketConfig.solanaAddress);
 
+    const isDelegated = Boolean((round as any).delegateTxHash && !(round as any).undelegateTxHash);
+
     let lockTxHash: string;
     try {
       lockTxHash = await tossrProgram.lockRound(
         marketPubkey,
         round.roundNumber,
-        adminKeypair
+        adminKeypair,
+        { useER: isDelegated }
       );
     } catch (e: any) {
       const msg = String(e?.message || '');
@@ -303,7 +306,8 @@ export class RoundsService {
         lockTxHash = await tossrProgram.lockRound(
           marketPubkey,
           round.roundNumber,
-          adminKeypair
+          adminKeypair,
+          { useER: false }
         );
       } else {
         throw e;
@@ -323,13 +327,27 @@ export class RoundsService {
 
     await this.generateAndCommitOutcome(roundId);
 
-    try {
-      const mref = (round as any).marketId
-      const marketId = typeof mref === 'object' && mref !== null ? String(mref._id ?? mref) : String(mref)
-      await this.openRound(marketId)
-      logger.info({ roundId, marketId }, 'Opened next round immediately after lock')
-    } catch (e) {
-      logger.error({ roundId, err: e }, 'Failed to open next round after lock')
+    const mref = (round as any).marketId;
+    const marketId = typeof mref === 'object' && mref !== null ? String(mref._id ?? mref) : String(mref);
+    const maxRetries = 3;
+    let roundOpened = false;
+
+    for (let attempt = 0; attempt < maxRetries && !roundOpened; attempt++) {
+      try {
+        if (attempt > 0) {
+          await new Promise(r => setTimeout(r, 1000 * attempt));
+        }
+
+        await this.openRound(marketId);
+        roundOpened = true;
+        logger.info({ roundId, marketId, attempt }, 'Opened next round after lock');
+      } catch (e) {
+        logger.error({ roundId, marketId, err: e, attempt, maxRetries }, `Failed to open next round after lock (attempt ${attempt + 1}/${maxRetries})`);
+
+        if (attempt === maxRetries - 1) {
+          logger.error({ roundId, marketId }, 'All retry attempts exhausted, auto-open scheduler will handle');
+        }
+      }
     }
 
     return lockTxHash;
@@ -664,9 +682,9 @@ export class RoundsService {
   }
 
   async getActiveRounds(marketId?: string) {
-    const query: any = { status: RoundStatus.PREDICTING };
+    const query: any = { status: { $in: [RoundStatus.PREDICTING, RoundStatus.QUEUED] } };
     if (marketId) query.marketId = marketId;
-    const rounds = await Round.find(query).sort({ openedAt: 1 }).lean();
+    const rounds = await Round.find(query).sort({ openedAt: 1, scheduledReleaseAt: 1 }).lean();
     const marketIds = Array.from(new Set(rounds.map((r: any) => r.marketId)));
     const markets = await Market.find({ _id: { $in: marketIds } }).select('name type config').lean();
     const mMap = new Map(
@@ -825,7 +843,8 @@ export class RoundsService {
     }
 
     const openedTime = round.openedAt ? new Date(round.openedAt).getTime() : Date.now();
-    const latestBetTime = bets[bets.length - 1].createdAt ? new Date(bets[bets.length - 1].createdAt).getTime() : Date.now();
+    const lastBet = bets[bets.length - 1];
+    const latestBetTime = lastBet?.createdAt ? new Date(lastBet.createdAt).getTime() : Date.now();
     const duration = latestBetTime - openedTime;
     const intervalMs = Math.max(60000, Math.floor(duration / 20));
 

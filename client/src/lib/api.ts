@@ -32,9 +32,11 @@ async function request<T>(
 
   try {
     const controller = new AbortController()
-    const timeoutId = setTimeout(() => controller.abort(), 15000)
+    const timeoutMs = (options as any)?.timeoutMs ?? 15000
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
 
-    const response = await fetch(url, { ...config, signal: controller.signal })
+    const { timeoutMs: _omit, ...rest } = (options as any)
+    const response = await fetch(url, { ...config, ...rest, signal: controller.signal })
     clearTimeout(timeoutId)
     
     const data = await response.json()

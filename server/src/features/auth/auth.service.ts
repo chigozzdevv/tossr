@@ -29,12 +29,19 @@ export class AuthService {
     }
     await redis.del(redisKeys.authNonce(publicKey));
 
-    // Find or create user
+    // Find or create user (migrate legacy lowercased records)
     let user = await User.findOne({ walletAddress: publicKey });
+    if (!user) {
+      const legacy = await User.findOne({ walletAddress: publicKey.toLowerCase() });
+      if (legacy) {
+        await User.updateOne({ _id: (legacy as any)._id }, { $set: { walletAddress: publicKey } });
+        user = await User.findById((legacy as any)._id);
+        logger.warn({ wallet: publicKey }, 'Migrated legacy lowercased walletAddress to exact-case');
+      }
+    }
 
     if (!user) {
       user = await User.create({ walletAddress: publicKey });
-
       logger.info(`New user created: ${publicKey}`);
     }
 

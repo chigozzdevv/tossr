@@ -59,5 +59,47 @@ export async function analyticsRoutes(fastify: FastifyInstance) {
     },
     controller.getTimeSeries
   );
+
+  fastify.get(
+    '/market-health',
+    {
+      schema: {
+        tags: ['Analytics'],
+        summary: 'Market health metrics',
+        description: 'Health indicators for all markets: active rounds, volume growth, settlement rate',
+      },
+    },
+    controller.getMarketHealth
+  );
+
+  fastify.get(
+    '/trending-markets',
+    {
+      schema: {
+        tags: ['Analytics'],
+        summary: 'Trending markets',
+        description: 'Markets sorted by 24h volume with growth metrics',
+        querystring: {
+          type: 'object',
+          properties: {
+            limit: { type: 'number', minimum: 1, maximum: 50, default: 10 },
+          },
+        },
+      },
+    },
+    controller.getTrendingMarkets
+  );
+
+  fastify.get(
+    '/round-performance',
+    {
+      schema: {
+        tags: ['Analytics'],
+        summary: 'Round performance metrics',
+        description: 'Average round duration and lifecycle timings',
+      },
+    },
+    controller.getRoundPerformanceMetrics
+  );
 }
 
