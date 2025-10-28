@@ -260,19 +260,17 @@ export function RoundDetailPage() {
       let sig: string
 
       const isRoundDelegated = round.delegateTxHash && !round.undelegateTxHash
-      const sendConn = isRoundDelegated
-        ? new Connection(config.EPHEMERAL_RPC_URL, {
-            commitment: 'confirmed',
-            wsEndpoint: config.EPHEMERAL_WS_URL,
-          })
-        : connection
+      const submitRpcUrl = (transactionPayload as any)?.submitRpcUrl as string | undefined
+      const sendConn = submitRpcUrl
+        ? new Connection(submitRpcUrl, { commitment: 'confirmed' })
+        : (isRoundDelegated ? new Connection(config.EPHEMERAL_RPC_URL, { commitment: 'confirmed' }) : connection)
 
       try {
         const baseBalance = await connection.getBalance(wallet.publicKey!)
         console.log('Wallet balance (base devnet):', baseBalance / 1_000_000_000, 'SOL')
       } catch {}
 
-      console.log('Sending transaction to:', isRoundDelegated ? 'Magic Router (ER)' : 'Solana Base')
+      console.log('Sending transaction to:', submitRpcUrl || (isRoundDelegated ? 'Magic Router/ER' : 'Solana Base'))
 
       try {
         const tx = Transaction.from(txBytes)
@@ -291,11 +289,9 @@ export function RoundDetailPage() {
       console.log('Transaction sent:', sig)
 
       try {
-        const confirmConn = isRoundDelegated
-          ? new Connection(config.EPHEMERAL_RPC_URL, {
-              commitment: 'confirmed',
-              wsEndpoint: config.EPHEMERAL_WS_URL,
-            })
+        const confirmRpcUrl = submitRpcUrl || (isRoundDelegated ? config.EPHEMERAL_RPC_URL : undefined)
+        const confirmConn = confirmRpcUrl
+          ? new Connection(confirmRpcUrl, { commitment: 'confirmed' })
           : connection;
         const confirmation = await confirmConn.confirmTransaction(sig, 'confirmed');
         if (confirmation?.value?.err) {

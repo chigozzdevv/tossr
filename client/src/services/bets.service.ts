@@ -34,6 +34,7 @@ type BetTxResponse = {
   vaultPda?: string
   needsVaultAta?: boolean
   mint?: string
+  submitRpcUrl?: string
 }
 
 export const betsService = {

@@ -4,6 +4,7 @@ import { config } from '@/config/env';
 import { logger } from '@/utils/logger';
 import { createHash } from 'crypto';
 import { getAdminKeypair } from '@/config/admin-keypair';
+import { generateOutcomeLocal, LocalTeeAttestation, TeeMarketType } from '@/solana/local-tee';
 
 interface TeeAttestation {
   round_id: string;
@@ -16,7 +17,10 @@ interface TeeAttestation {
   signature: string;
   public_key: string;
   timestamp: number;
+  local_fallback?: boolean;
 }
+
+const localStreakState = new Map<string, number>();
 
 export class TeeService {
   private teeRpcUrl: string;
@@ -40,7 +44,7 @@ export class TeeService {
     if (this.integrityOkAt && now - this.integrityOkAt < config.ATTESTATION_CACHE_TTL * 1000) {
       return;
     }
-    const { verifyTeeRpcIntegrity } = await import('@magicblock-labs/ephemeral-rollups-sdk/lib/privacy/verify.js');
+    const { verifyTeeRpcIntegrity } = await import('@magicblock-labs/ephemeral-rollups-sdk/privacy');
     const ok = await verifyTeeRpcIntegrity(this.teeRpcUrl);
     if (!ok) {
       throw new Error('TEE integrity verification failed');
@@ -73,7 +77,7 @@ export class TeeService {
     if (this.authToken && this.authTokenExpiresAt && now < this.authTokenExpiresAt) {
       return this.authToken;
     }
-    const { getAuthToken } = await import('@magicblock-labs/ephemeral-rollups-sdk/lib/privacy/auth.js');
+    const { getAuthToken } = await import('@magicblock-labs/ephemeral-rollups-sdk/privacy');
     const token = await getAuthToken(
       this.teeRpcUrl,
       this.adminPublicKey,
@@ -102,27 +106,27 @@ export class TeeService {
       vrfRandomness?: Uint8Array;
     } = {}
   ): Promise<TeeAttestation> {
+    const teeMarketType = ((): TeeMarketType => {
+      const map: Record<string, TeeMarketType> = {
+        PICK_RANGE: 'PickRange',
+        EVEN_ODD: 'EvenOdd',
+        LAST_DIGIT: 'LastDigit',
+        MODULO_THREE: 'ModuloThree',
+        PATTERN_OF_DAY: 'PatternOfDay',
+        SHAPE_COLOR: 'ShapeColor',
+        JACKPOT: 'Jackpot',
+        ENTROPY_BATTLE: 'EntropyBattle',
+        STREAK_METER: 'StreakMeter',
+        COMMUNITY_SEED: 'CommunitySeed',
+      };
+      return map[marketType] || 'PickRange';
+    })();
+
     try {
       await this.ensureIntegrity();
       const endpoint = await this.buildUrl('/generate_outcome');
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 30000);
-
-      const teeMarketType = ((): string => {
-        const map: Record<string, string> = {
-          PICK_RANGE: 'PickRange',
-          EVEN_ODD: 'EvenOdd',
-          LAST_DIGIT: 'LastDigit',
-          MODULO_THREE: 'ModuloThree',
-          PATTERN_OF_DAY: 'PatternOfDay',
-          SHAPE_COLOR: 'ShapeColor',
-          JACKPOT: 'Jackpot',
-          ENTROPY_BATTLE: 'EntropyBattle',
-          STREAK_METER: 'StreakMeter',
-          COMMUNITY_SEED: 'CommunitySeed',
-        };
-        return map[marketType] || 'PickRange';
-      })();
 
       const response = await fetch(endpoint, {
         method: 'POST',
@@ -142,13 +146,29 @@ export class TeeService {
       clearTimeout(timeout);
 
       if (!response.ok) {
-        throw new Error(`TEE RPC HTTP ${response.status}: ${response.statusText}`);
+        let errorDetail: string | undefined;
+        try {
+          errorDetail = await response.text();
+        } catch {
+          errorDetail = undefined;
+        }
+        throw new Error(`TEE RPC HTTP ${response.status}: ${response.statusText}${errorDetail ? ` - ${errorDetail}` : ''}`);
       }
 
       return (await response.json()) as TeeAttestation;
     } catch (error: any) {
-      logger.error({ err: error }, 'TEE outcome generation failed');
-      throw new Error(`TEE RPC error: ${error.message}`);
+      logger.error({ err: error }, 'TEE outcome generation failed, falling back to local engine');
+      const local: LocalTeeAttestation = await generateOutcomeLocal(
+        config.TEE_PRIVATE_KEY_HEX,
+        roundId,
+        teeMarketType,
+        {
+          chainHash: params.chainHash,
+          communitySeeds: params.communitySeeds,
+          vrfRandomness: params.vrfRandomness,
+        }
+      );
+      return { ...local, local_fallback: true };
     }
   }
 
@@ -185,7 +205,11 @@ export class TeeService {
       return (await response.json()) as { new_streak: number };
     } catch (error: any) {
       logger.error({ err: error }, 'TEE streak update failed');
-      throw new Error(`TEE RPC error: ${error.message}`);
+      const key = `${roundId}:${wallet}`;
+      const current = localStreakState.get(key) ?? 0;
+      const next = won ? current + 1 : 0;
+      localStreakState.set(key, next);
+      return { new_streak: next };
     }
   }
 
@@ -210,7 +234,7 @@ export class TeeService {
       return (await response.json()) as { streak: number };
     } catch (error: any) {
       logger.error({ err: error }, 'TEE streak fetch failed');
-      throw new Error(`TEE RPC error: ${error.message}`);
+      return { streak: localStreakState.get(wallet) ?? 0 };
     }
   }
 

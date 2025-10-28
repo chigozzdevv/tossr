@@ -12,7 +12,6 @@ import { getAssociatedTokenAddress } from '@solana/spl-token';
 import { getMarketConfig } from '@/utils/market-config';
 import bs58 from 'bs58';
 import { DISCRIMINATORS } from '@/utils/anchor-discriminators';
-
 const tossrProgram = new TossrProgramService();
 
 export class BetsService {
@@ -73,7 +72,7 @@ export class BetsService {
       selectionEncoded,
       stake,
       mint,
-      { useER: Boolean((round as any).delegateTxHash && !(round as any).undelegateTxHash) }
+      { useER: false }
     );
 
     const serializedTransaction = transaction.serialize({ requireAllSignatures: false, verifySignatures: false });
@@ -87,6 +86,9 @@ export class BetsService {
       vaultPda: vaultPda ? vaultPda.toString() : undefined,
       needsVaultAta,
       mint: mint.toString(),
+      submitRpcUrl: Boolean((round as any).delegateTxHash && !(round as any).undelegateTxHash)
+        ? config.EPHEMERAL_RPC_URL
+        : config.SOLANA_RPC_URL,
     } as any;
   }
 
@@ -120,10 +122,46 @@ export class BetsService {
     }
 
     const isDelegated = Boolean((round as any).delegateTxHash && !(round as any).undelegateTxHash);
-    const erConn = new Connection(config.EPHEMERAL_RPC_URL, {
-      commitment: 'confirmed',
-      wsEndpoint: config.EPHEMERAL_WS_URL,
-    });
+    const erConn = new Connection(config.EPHEMERAL_RPC_URL, { commitment: 'confirmed' });
+    const baseConn = new Connection(config.SOLANA_RPC_URL, { commitment: 'confirmed' });
+    const betPdaPk = new PublicKey(betPda);
+
+    if (isDelegated) {
+      try {
+        logger.info({ txSignature, roundId }, 'Processing ER bet (fast path)...');
+
+        await new Promise(r => setTimeout(r, 300));
+
+        let betAccountInfo = await erConn.getAccountInfo(betPdaPk, 'confirmed');
+
+        if (!betAccountInfo) {
+          for (let i = 0; i < 8; i++) {
+            await new Promise(r => setTimeout(r, 250));
+            betAccountInfo = await erConn.getAccountInfo(betPdaPk, 'confirmed');
+            if (betAccountInfo) break;
+          }
+        }
+
+        if (betAccountInfo) {
+          logger.info({ txSignature, roundId, duration: '< 3s' }, 'ER bet confirmed (fast path)');
+          return await this.processBetConfirmation(
+            userId,
+            roundId,
+            round,
+            betAccountInfo,
+            txSignature,
+            betPda,
+            stake,
+            selection
+          );
+        }
+
+        logger.warn({ txSignature, roundId }, 'Bet account not found on ER after 2.3s, falling back to polling');
+      } catch (error: any) {
+        logger.error({ txSignature, roundId, error: error?.message }, 'ER fast path failed, falling back to polling');
+      }
+    }
+
     const routerEndpoint = config.EPHEMERAL_RPC_URL.includes('magicblock.app')
       ? 'https://devnet-router.magicblock.app'
       : config.EPHEMERAL_RPC_URL;
@@ -134,12 +172,10 @@ export class BetsService {
             httpHeaders: { 'Content-Type': 'application/json' },
           } as any)
         : new Connection(routerEndpoint, { commitment: 'confirmed' });
-    const baseConn = new Connection(config.SOLANA_RPC_URL, { commitment: 'confirmed' });
 
     const connections = isDelegated
       ? [erConn, routerConn, baseConn]
       : [baseConn, erConn, routerConn];
-    const betPdaPk = new PublicKey(betPda);
     const toNumber = (value: any) => {
       if (typeof value === 'number') return value;
       if (typeof value === 'bigint') return Number(value);
@@ -550,5 +586,89 @@ export class BetsService {
       })
     );
     return refunds;
+  }
+
+  private async processBetConfirmation(
+    userId: string,
+    roundId: string,
+    round: any,
+    betAccountInfo: any,
+    txSignature: string,
+    betPda: string,
+    clientStake: number,
+    clientSelection: any
+  ) {
+    let finalStake = clientStake;
+    let finalSelection = clientSelection;
+
+    const toNumber = (value: any) => {
+      if (typeof value === 'number') return value;
+      if (typeof value === 'bigint') return Number(value);
+      if (value && typeof value.toNumber === 'function') {
+        return value.toNumber();
+      }
+      if (value && typeof value.toString === 'function') {
+        const n = Number(value.toString());
+        return Number.isNaN(n) ? 0 : n;
+      }
+      return Number(value ?? 0);
+    };
+
+    try {
+      const decodedBet = tossrProgram.decodeBetAccount(betAccountInfo.data);
+      if (decodedBet?.stake) {
+        finalStake = toNumber(decodedBet.stake);
+      }
+      if (decodedBet?.selection) {
+        const sel = decodedBet.selection;
+        const encoded = {
+          kind: toNumber(sel.kind),
+          a: toNumber(sel.a),
+          b: toNumber(sel.b),
+          c: toNumber(sel.c),
+        };
+        finalSelection = this.decodeSelection(encoded, (round.marketId as any).type);
+      }
+    } catch (err) {
+      logger.warn({ err, betPda }, 'Failed to decode bet account');
+    }
+
+    const cfg = getMarketConfig((round.marketId as any).config as unknown) as any;
+    const houseEdgeBps: number = typeof cfg?.houseEdgeBps === 'number' ? cfg.houseEdgeBps : 0;
+
+    let bet;
+    try {
+      bet = await Bet.create({
+        userId,
+        roundId,
+        marketId: round.marketId,
+        selection: finalSelection,
+        stake: finalStake,
+        odds: this.calculateOdds(finalSelection, (round.marketId as any).type, houseEdgeBps),
+        status: BetStatus.PENDING,
+        txSignature,
+      });
+    } catch (err: any) {
+      if (err?.code === 11000) {
+        const existing = await Bet.findOne({ txSignature }).lean();
+        if (existing) {
+          await redis.set(`bet-confirm:${txSignature}`, (existing as any).id || (existing as any)._id.toString(), 'EX', 86400);
+          return { ...existing, stake: Number(existing.stake), txSignature, betPda } as any;
+        }
+      }
+      throw err;
+    }
+
+    await redis.set(`bet-confirm:${txSignature}`, (bet as any).id || (bet as any)._id.toString(), 'EX', 86400);
+    await redis.hset(
+      redisKeys.roundBets(roundId),
+      (bet as any).id || (bet as any)._id.toString(),
+      JSON.stringify({ ...bet.toObject?.() || bet, txSignature, betPda })
+    );
+    await redis.incr(redisKeys.betCount(roundId));
+
+    logger.info({ betId: (bet as any).id || (bet as any)._id.toString(), userId, roundId, txSignature, betPda }, 'Bet confirmed');
+
+    return { ...(bet.toObject?.() || bet), stake: Number(bet.stake), txSignature, betPda } as any;
   }
 }

@@ -21,8 +21,10 @@ import {
   delegateBufferPdaFromDelegatedAccountAndOwnerProgram,
   delegationMetadataPdaFromDelegatedAccount,
   delegationRecordPdaFromDelegatedAccount,
+  GetCommitmentSignature,
 } from '@magicblock-labs/ephemeral-rollups-sdk';
 import { ConnectionMagicRouter } from '@magicblock-labs/ephemeral-rollups-sdk';
+import { confirmTransactionHTTP, withRetry } from '@/utils/transaction-confirmation';
 import { config } from '@/config/env';
 import { logger } from '@/utils/logger';
 import { DISCRIMINATORS } from '@/utils/anchor-discriminators';
@@ -35,9 +37,9 @@ const DELEGATION_PROGRAM_PK = new PublicKey(config.DELEGATION_PROGRAM_ID);
 const MAGIC_PROGRAM_PK = SDK_MAGIC_PROGRAM_ID as unknown as PublicKey;
 const MAGIC_CONTEXT_PK = SDK_MAGIC_CONTEXT_ID as unknown as PublicKey;
 const VRF_PROGRAM_PK = new PublicKey('Vrf1RNUjXmQGjmQrQLvJHs9SNkvDJEsRVFPkfSQUwGz');
-const [VRF_PROGRAM_IDENTITY_PK] = PublicKey.findProgramAddressSync(
+const [PROGRAM_IDENTITY_PDA] = PublicKey.findProgramAddressSync(
   [Buffer.from('identity')],
-  VRF_PROGRAM_PK,
+  TOSSR_PROGRAM_ID,
 );
 const VRF_DEFAULT_QUEUE_PK = new PublicKey('Cuj97ggrhhidhbu39TijNVqE74xvKJ69gDervRUXAxGh');
 
@@ -80,6 +82,20 @@ export class TossrProgramService {
     }
   }
 
+  private async sendAndConfirm(
+    conn: Connection,
+    tx: Transaction,
+    signers: Keypair[],
+    commitment: 'processed' | 'confirmed' | 'finalized' = 'confirmed',
+    skipPreflight = false
+  ): Promise<string> {
+    tx.sign(...signers);
+    const rawTx = tx.serialize();
+    const signature = await conn.sendRawTransaction(rawTx, { skipPreflight });
+    await confirmTransactionHTTP(conn, signature, commitment);
+    return signature;
+  }
+
   private getRouterUrl(url: string): string {
     if (/router\.magicblock\.app/.test(url)) return url;
     if (/devnet\.magicblock\.app/.test(url)) return 'https://devnet-router.magicblock.app';
@@ -110,9 +126,7 @@ export class TossrProgramService {
     const { blockhash } = await this.connection.getLatestBlockhash();
     tx.recentBlockhash = blockhash;
     tx.feePayer = adminKeypair.publicKey;
-    const sig = await this.connection.sendTransaction(tx, [adminKeypair], { skipPreflight: false });
-    await this.connection.confirmTransaction(sig);
-    return sig;
+    return this.sendAndConfirm(this.connection, tx, [adminKeypair], 'confirmed');
   }
 
   async placeBet(
@@ -230,47 +244,76 @@ export class TossrProgramService {
     }
 
     const transaction = new Transaction().add(...ixs, instruction);
-    const provider = opts?.useER ? this.erConnection : this.connection;
+    const useER = Boolean(opts?.useER);
+    const blockhashInfo = useER
+      ? await this.getErBlockhashForTransaction(transaction)
+      : await this.getBaseBlockhash();
 
-    const maxAttempts = 5;
-    let blockhash: string | undefined;
-    let lastError: unknown;
-    let triedFallback = false;
-    let currentProvider = provider;
-
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      try {
-        const result = await currentProvider.getLatestBlockhash();
-        blockhash = result.blockhash;
-        break;
-      } catch (e: any) {
-        lastError = e;
-        const msg = String(e?.message || '');
-
-        if (!triedFallback && opts?.useER && (msg.includes('fetch failed') || msg.includes('403') || msg.includes('UND_ERR_CONNECT_TIMEOUT'))) {
-          currentProvider = this.connection;
-          triedFallback = true;
-          logger.warn({ attempt }, 'Ephemeral RPC failed, falling back to Syndica RPC for blockhash');
-          continue;
-        }
-
-        if (msg.includes('fetch failed') || msg.includes('UND_ERR_CONNECT_TIMEOUT')) {
-          await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
-          continue;
-        }
-        throw e;
-      }
+    transaction.recentBlockhash = blockhashInfo.blockhash;
+    if (blockhashInfo.lastValidBlockHeight !== undefined) {
+      (transaction as any).lastValidBlockHeight = blockhashInfo.lastValidBlockHeight;
     }
-
-    if (!blockhash) {
-      logger.error({ lastError, useER: opts?.useER }, 'Failed to get blockhash after all retries');
-      throw lastError || new Error('Failed to get recent blockhash');
-    }
-
-    transaction.recentBlockhash = blockhash;
     transaction.feePayer = userPublicKey;
 
     return { transaction, betPda };
+  }
+
+  private async getBaseBlockhash(): Promise<{ blockhash: string; lastValidBlockHeight: number }> {
+    const maxAttempts = 5;
+    let lastError: unknown;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        return await this.connection.getLatestBlockhash();
+      } catch (err: any) {
+        lastError = err;
+        const msg = String(err?.message || '');
+        if (msg.includes('fetch failed') || msg.includes('UND_ERR_CONNECT_TIMEOUT')) {
+          await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
+          continue;
+        }
+        throw err;
+      }
+    }
+    logger.error({ lastError }, 'Failed to fetch base layer blockhash');
+    throw lastError || new Error('Failed to fetch base layer blockhash');
+  }
+
+  private async getErBlockhashForTransaction(
+    tx: Transaction
+  ): Promise<{ blockhash: string; lastValidBlockHeight?: number }> {
+    const maxAttempts = 5;
+    let lastError: unknown;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        return await this.erConnection.getLatestBlockhash();
+      } catch (err: any) {
+        lastError = err;
+        const msg = String(err?.message || '');
+        if (msg.includes('fetch failed') || msg.includes('UND_ERR_CONNECT_TIMEOUT') || msg.includes('ECONNRESET')) {
+          await new Promise((resolve) => setTimeout(resolve, 200 * (attempt + 1)));
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    if (this.routerConnection) {
+      try {
+        const routerBlockhash = await this.routerConnection.getLatestBlockhashForTransaction(tx);
+        if (routerBlockhash?.blockhash) {
+          return routerBlockhash;
+        }
+      } catch (routerErr: any) {
+        lastError = routerErr;
+        logger.warn(
+          { error: routerErr instanceof Error ? routerErr.message : String(routerErr) },
+          'Magic Router blockhash fallback failed'
+        );
+      }
+    }
+
+    logger.error({ lastError }, 'Failed to fetch ER blockhash');
+    throw lastError || new Error('Failed to fetch ER blockhash');
   }
 
   async settleBet(
@@ -336,16 +379,8 @@ export class TossrProgramService {
     transaction.recentBlockhash = blockhash;
     transaction.feePayer = adminKeypair.publicKey;
 
-    const signature = await this.connection.sendTransaction(
-      transaction,
-      [adminKeypair],
-      { skipPreflight: false }
-    );
-
-    await this.connection.confirmTransaction(signature);
-
+    const signature = await this.sendAndConfirm(this.connection, transaction, [adminKeypair], 'finalized');
     logger.info({ signature, betPda: betPda.toString() }, 'Bet settled on-chain');
-
     return signature;
   }
 
@@ -380,13 +415,12 @@ export class TossrProgramService {
     transaction.recentBlockhash = blockhash;
     transaction.feePayer = adminKeypair.publicKey;
 
-    const signature = await this.connection.sendTransaction(
+    const signature = await this.sendAndConfirm(
+      this.connection,
       transaction,
       [adminKeypair],
-      { skipPreflight: false }
+      'finalized'
     );
-
-    await this.connection.confirmTransaction(signature, 'finalized');
 
     logger.info({ signature, roundPda: roundPda.toString() }, 'Round opened on-chain');
 
@@ -461,8 +495,7 @@ export class TossrProgramService {
       const { blockhash } = await this.connection.getLatestBlockhash();
       tx.recentBlockhash = blockhash;
       tx.feePayer = adminKeypair.publicKey;
-      const sig = await this.connection.sendTransaction(tx, [adminKeypair], { skipPreflight: false });
-      await this.connection.confirmTransaction(sig);
+      const sig = await this.sendAndConfirm(this.connection, tx, [adminKeypair], 'finalized');
       logger.info({ signature: sig, roundPda: roundPda.toString() }, 'Round locked on-chain');
       return sig;
     }
@@ -472,8 +505,7 @@ export class TossrProgramService {
       const { blockhash } = await this.erConnection.getLatestBlockhash();
       tx.recentBlockhash = blockhash;
       tx.feePayer = adminKeypair.publicKey;
-      const sig = await this.erConnection.sendTransaction(tx, [adminKeypair], { skipPreflight: true });
-      await this.erConnection.confirmTransaction(sig);
+      const sig = await this.sendAndConfirm(this.erConnection, tx, [adminKeypair], 'confirmed', true);
       logger.info({ signature: sig, roundPda: roundPda.toString() }, 'Round locked on ER');
       return sig;
     } catch (e: any) {
@@ -517,15 +549,12 @@ export class TossrProgramService {
     transaction.recentBlockhash = blockhash;
     transaction.feePayer = adminKeypair.publicKey;
 
-    const signature = await this.connection.sendTransaction(
+    return this.sendAndConfirm(
+      this.connection,
       transaction,
       [adminKeypair],
-      { skipPreflight: false }
+      'finalized'
     );
-
-    await this.connection.confirmTransaction(signature);
-
-    return signature;
   }
 
   async commitOutcomeHash(
@@ -533,11 +562,12 @@ export class TossrProgramService {
     roundNumber: number,
     commitmentHash: Buffer,
     attestationSig: Buffer,
-    adminKeypair: Keypair
+    adminKeypair: Keypair,
+    opts?: { useER?: boolean }
   ): Promise<string> {
     const roundNumberBuffer = Buffer.alloc(8);
     roundNumberBuffer.writeBigUInt64LE(BigInt(roundNumber));
-    
+
     const [roundPda] = PublicKey.findProgramAddressSync(
       [ROUND_SEED, marketId.toBuffer(), roundNumberBuffer],
       TOSSR_PROGRAM_ID
@@ -559,20 +589,74 @@ export class TossrProgramService {
       data,
     });
 
-    const transaction = new Transaction().add(instruction);
-    const { blockhash } = await this.connection.getLatestBlockhash();
-    transaction.recentBlockhash = blockhash;
-    transaction.feePayer = adminKeypair.publicKey;
+    const useER = Boolean(opts?.useER);
+    const conn = useER ? this.erConnection : this.connection;
+    const commitment = useER ? 'confirmed' : 'finalized';
+    const skipPreflight = useER;
 
-    const signature = await this.connection.sendTransaction(
-      transaction,
-      [adminKeypair],
-      { skipPreflight: false }
-    );
+    if (!useER) {
+      const tx = new Transaction().add(instruction);
+      const { blockhash } = await conn.getLatestBlockhash();
+      tx.recentBlockhash = blockhash;
+      tx.feePayer = adminKeypair.publicKey;
+      return this.sendAndConfirm(conn, tx, [adminKeypair], commitment, skipPreflight);
+    }
 
-    await this.connection.confirmTransaction(signature, 'finalized');
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const tx = new Transaction().add(instruction);
+        const { blockhash } = await conn.getLatestBlockhash();
+        tx.recentBlockhash = blockhash;
+        tx.feePayer = adminKeypair.publicKey;
+        return await this.sendAndConfirm(conn, tx, [adminKeypair], commitment, skipPreflight);
+      } catch (error: any) {
+        lastError = error;
+        const message = String(error?.message || '');
+        if (!/Blockhash not found|fetch failed|UND_ERR_CONNECT_TIMEOUT|403|channel closed|PubsubClientError|Remote account provider error/i.test(message)) {
+          throw error;
+        }
+        if (attempt < 2) {
+          await this.sleep(400 * (attempt + 1));
+          continue;
+        }
+      }
+    }
 
-    return signature;
+    const errMessage = lastError instanceof Error ? lastError.message : String(lastError ?? 'unknown error');
+    if (!this.routerConnection) {
+      throw lastError instanceof Error ? lastError : new Error(errMessage);
+    }
+
+    logger.warn({ roundNumber, error: errMessage }, 'ER commit failed; falling back to Magic Router');
+
+    let fallbackError: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        return await this.sendViaRouter(new Transaction().add(instruction), [adminKeypair], 'confirmed');
+      } catch (routerErr) {
+        fallbackError = routerErr;
+        const message = String((routerErr as any)?.message || '');
+        if (!/Blockhash not found|fetch failed|UND_ERR_CONNECT_TIMEOUT|403|channel closed|PubsubClientError|Remote account provider error/i.test(message)) {
+          throw routerErr;
+        }
+        if (attempt < 2) {
+          await this.sleep(500 * (attempt + 1));
+          continue;
+        }
+      }
+    }
+
+    logger.warn({ roundNumber }, 'Router commit failed; attempting base-layer commit as last resort');
+    try {
+      const tx = new Transaction().add(instruction);
+      const { blockhash } = await this.connection.getLatestBlockhash();
+      tx.recentBlockhash = blockhash;
+      tx.feePayer = adminKeypair.publicKey;
+      return await this.sendAndConfirm(this.connection, tx, [adminKeypair], 'finalized', false);
+    } catch (finalErr) {
+      throw finalErr instanceof Error ? finalErr : fallbackError instanceof Error ? fallbackError : lastError;
+    }
   }
 
   async revealOutcome(
@@ -615,16 +699,8 @@ export class TossrProgramService {
     transaction.recentBlockhash = blockhash;
     transaction.feePayer = adminKeypair.publicKey;
 
-    const signature = await this.connection.sendTransaction(
-      transaction,
-      [adminKeypair],
-      { skipPreflight: false }
-    );
-
-    await this.connection.confirmTransaction(signature);
-
+    const signature = await this.sendAndConfirm(this.connection, transaction, [adminKeypair], 'finalized');
     logger.info({ signature, roundPda: roundPda.toString(), value }, 'Outcome revealed on-chain');
-
     return signature;
   }
 
@@ -670,13 +746,12 @@ export class TossrProgramService {
     transaction.recentBlockhash = blockhash;
     transaction.feePayer = adminKeypair.publicKey;
 
-    const signature = await this.connection.sendTransaction(
+    const signature = await this.sendAndConfirm(
+      this.connection,
       transaction,
       [adminKeypair],
-      { skipPreflight: false }
+      'finalized'
     );
-
-    await this.connection.confirmTransaction(signature);
 
     logger.info({ signature, roundPda: roundPda.toString(), shape, color, size }, 'Shape outcome revealed');
 
@@ -725,13 +800,12 @@ export class TossrProgramService {
     transaction.recentBlockhash = blockhash;
     transaction.feePayer = adminKeypair.publicKey;
 
-    const signature = await this.connection.sendTransaction(
+    const signature = await this.sendAndConfirm(
+      this.connection,
       transaction,
       [adminKeypair],
-      { skipPreflight: false }
+      'finalized'
     );
-
-    await this.connection.confirmTransaction(signature);
 
     logger.info({ signature, roundPda: roundPda.toString(), patternId, matchedValue }, 'Pattern outcome revealed');
 
@@ -768,8 +842,13 @@ export class TossrProgramService {
       const { blockhash } = await this.erConnection.getLatestBlockhash();
       tx.recentBlockhash = blockhash;
       tx.feePayer = adminKeypair.publicKey;
-      const sig = await this.erConnection.sendTransaction(tx, [adminKeypair], { skipPreflight: true });
-      await this.erConnection.confirmTransaction(sig);
+      const sig = await this.sendAndConfirm(
+        this.erConnection,
+        tx,
+        [adminKeypair],
+        'confirmed',
+        true
+      );
       return sig;
     } catch (e: any) {
       const msg = String(e?.message || '');
@@ -813,8 +892,13 @@ export class TossrProgramService {
       const { blockhash } = await this.erConnection.getLatestBlockhash();
       tx.recentBlockhash = blockhash;
       tx.feePayer = adminKeypair.publicKey;
-      const sig = await this.erConnection.sendTransaction(tx, [adminKeypair], { skipPreflight: true });
-      await this.erConnection.confirmTransaction(sig);
+      const sig = await this.sendAndConfirm(
+        this.erConnection,
+        tx,
+        [adminKeypair],
+        'confirmed',
+        true
+      );
       return sig;
     } catch (e: any) {
       const msg = String(e?.message || '');
@@ -858,8 +942,13 @@ export class TossrProgramService {
       const { blockhash } = await this.erConnection.getLatestBlockhash();
       tx.recentBlockhash = blockhash;
       tx.feePayer = adminKeypair.publicKey;
-      const sig = await this.erConnection.sendTransaction(tx, [adminKeypair], { skipPreflight: true });
-      await this.erConnection.confirmTransaction(sig);
+      const sig = await this.sendAndConfirm(
+        this.erConnection,
+        tx,
+        [adminKeypair],
+        'confirmed',
+        true
+      );
       return sig;
     } catch (e: any) {
       const msg = String(e?.message || '');
@@ -905,8 +994,13 @@ export class TossrProgramService {
       const { blockhash } = await this.erConnection.getLatestBlockhash();
       tx.recentBlockhash = blockhash;
       tx.feePayer = adminKeypair.publicKey;
-      const sig = await this.erConnection.sendTransaction(tx, [adminKeypair], { skipPreflight: true });
-      await this.erConnection.confirmTransaction(sig);
+      const sig = await this.sendAndConfirm(
+        this.erConnection,
+        tx,
+        [adminKeypair],
+        'confirmed',
+        true
+      );
       return sig;
     } catch (e: any) {
       const msg = String(e?.message || '');
@@ -950,8 +1044,13 @@ export class TossrProgramService {
       const { blockhash } = await this.erConnection.getLatestBlockhash();
       tx.recentBlockhash = blockhash;
       tx.feePayer = adminKeypair.publicKey;
-      const sig = await this.erConnection.sendTransaction(tx, [adminKeypair], { skipPreflight: true });
-      await this.erConnection.confirmTransaction(sig);
+      const sig = await this.sendAndConfirm(
+        this.erConnection,
+        tx,
+        [adminKeypair],
+        'confirmed',
+        true
+      );
       return sig;
     } catch (e: any) {
       const msg = String(e?.message || '');
@@ -969,6 +1068,7 @@ export class TossrProgramService {
     clientSeed: number,
     payer: Keypair,
     oracleQueue: PublicKey,
+    opts?: { useER?: boolean },
   ): Promise<string> {
     const roundNumberBuffer = Buffer.alloc(8);
     roundNumberBuffer.writeBigUInt64LE(BigInt(roundNumber));
@@ -986,7 +1086,7 @@ export class TossrProgramService {
         { pubkey: marketId, isSigner: false, isWritable: false },
         { pubkey: roundPda, isSigner: false, isWritable: true },
         { pubkey: oracleQueue, isSigner: false, isWritable: true },
-        { pubkey: VRF_PROGRAM_IDENTITY_PK, isSigner: false, isWritable: false },
+        { pubkey: PROGRAM_IDENTITY_PDA, isSigner: false, isWritable: false },
         { pubkey: VRF_PROGRAM_PK, isSigner: false, isWritable: false },
         { pubkey: SYSVAR_SLOT_HASHES_PUBKEY, isSigner: false, isWritable: false },
         { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
@@ -994,17 +1094,24 @@ export class TossrProgramService {
       programId: TOSSR_PROGRAM_ID,
       data,
     });
+    const useER = Boolean(opts?.useER);
+    const conn = useER ? this.erConnection : this.connection;
     const tx = new Transaction().add(ix);
     try {
-      const { blockhash } = await this.erConnection.getLatestBlockhash();
+      const { blockhash } = await conn.getLatestBlockhash();
       tx.recentBlockhash = blockhash;
       tx.feePayer = payer.publicKey;
-      const sig = await this.erConnection.sendTransaction(tx, [payer], { skipPreflight: true });
-      await this.erConnection.confirmTransaction(sig);
+      const sig = await this.sendAndConfirm(
+        conn,
+        tx,
+        [payer],
+        'confirmed',
+        true
+      );
       return sig;
     } catch (e: any) {
       const msg = String(e?.message || '');
-      if (!this.routerConnection || !(/Blockhash not found|fetch failed|UND_ERR_CONNECT_TIMEOUT|403|cannot be written/i.test(msg))) {
+      if (!useER || !this.routerConnection || !(/Blockhash not found|fetch failed|UND_ERR_CONNECT_TIMEOUT|403|cannot be written/i.test(msg))) {
         throw e;
       }
       const sig = await this.sendViaRouter(new Transaction().add(ix), [payer], 'confirmed');
@@ -1016,7 +1123,7 @@ export class TossrProgramService {
     marketId: PublicKey,
     roundNumber: number,
     payer: Keypair
-  ): Promise<string> {
+  ): Promise<{ erTxHash: string; baseTxHash: string }> {
     const roundNumberBuffer = Buffer.alloc(8);
     roundNumberBuffer.writeBigUInt64LE(BigInt(roundNumber));
     const [roundPda] = PublicKey.findProgramAddressSync(
@@ -1033,21 +1140,32 @@ export class TossrProgramService {
     const ix = new TransactionInstruction({ keys, programId: TOSSR_PROGRAM_ID, data: DISCRIMINATORS.COMMIT_ROUND });
     const tx = new Transaction().add(ix);
 
-    // Try ER first, then fallback to Magic Router
     try {
       const { blockhash } = await this.erConnection.getLatestBlockhash();
       tx.recentBlockhash = blockhash;
       tx.feePayer = payer.publicKey;
-      const sig = await this.erConnection.sendTransaction(tx, [payer], { skipPreflight: true });
-      await this.erConnection.confirmTransaction(sig);
-      return sig;
+      const erTxHash = await this.sendAndConfirm(
+        this.erConnection,
+        tx,
+        [payer],
+        'confirmed',
+        true
+      );
+
+      logger.info({ erTxHash, roundPda: roundPda.toString() }, 'Commit sent on ER');
+
+      const baseTxHash = await GetCommitmentSignature(erTxHash, this.erConnection);
+
+      logger.info({ baseTxHash, roundPda: roundPda.toString() }, 'Commit confirmed on base layer');
+
+      return { erTxHash, baseTxHash };
     } catch (e: any) {
       const msg = String(e?.message || '');
       if (!this.routerConnection || !(/Blockhash not found|fetch failed|UND_ERR_CONNECT_TIMEOUT|403|channel closed|PubsubClientError/i.test(msg))) {
         throw e;
       }
       const sig = await this.sendViaRouter(new Transaction().add(ix), [payer], 'confirmed');
-      return sig;
+      return { erTxHash: sig, baseTxHash: sig };
     }
   }
 
@@ -1055,7 +1173,7 @@ export class TossrProgramService {
     marketId: PublicKey,
     roundNumber: number,
     payer: Keypair
-  ): Promise<string> {
+  ): Promise<{ erTxHash: string; baseTxHash: string }> {
     const roundNumberBuffer = Buffer.alloc(8);
     roundNumberBuffer.writeBigUInt64LE(BigInt(roundNumber));
     const [roundPda] = PublicKey.findProgramAddressSync(
@@ -1076,9 +1194,21 @@ export class TossrProgramService {
       const { blockhash } = await this.erConnection.getLatestBlockhash();
       tx.recentBlockhash = blockhash;
       tx.feePayer = payer.publicKey;
-      const sig = await this.erConnection.sendTransaction(tx, [payer], { skipPreflight: true });
-      await this.erConnection.confirmTransaction(sig);
-      return sig;
+      const erTxHash = await this.sendAndConfirm(
+        this.erConnection,
+        tx,
+        [payer],
+        'confirmed',
+        true
+      );
+
+      logger.info({ erTxHash, roundPda: roundPda.toString() }, 'Commit and undelegate sent on ER');
+
+      const baseTxHash = await GetCommitmentSignature(erTxHash, this.erConnection);
+
+      logger.info({ baseTxHash, roundPda: roundPda.toString() }, 'Undelegate confirmed on base layer');
+
+      return { erTxHash, baseTxHash };
     } catch (e: any) {
       const msg = String(e?.message || '');
       if (!this.routerConnection || !(/Blockhash not found|fetch failed|UND_ERR_CONNECT_TIMEOUT|403|cannot be written/i.test(msg))) {
@@ -1092,7 +1222,7 @@ export class TossrProgramService {
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const sig = await this.sendViaRouter(new Transaction().add(ix), [payer], 'confirmed');
-        return sig;
+        return { erTxHash: sig, baseTxHash: sig };
       } catch (err) {
         lastErr = err;
         await this.sleep(400 * (attempt + 1));
@@ -1146,13 +1276,12 @@ export class TossrProgramService {
     transaction.recentBlockhash = blockhash;
     transaction.feePayer = adminKeypair.publicKey;
 
-    const signature = await this.connection.sendTransaction(
+    const signature = await this.sendAndConfirm(
+      this.connection,
       transaction,
       [adminKeypair],
-      { skipPreflight: false }
+      'finalized'
     );
-
-    await this.connection.confirmTransaction(signature);
 
     logger.info({ signature, roundPda: roundPda.toString(), winner }, 'Entropy outcome revealed');
 
@@ -1201,13 +1330,12 @@ export class TossrProgramService {
     transaction.recentBlockhash = blockhash;
     transaction.feePayer = adminKeypair.publicKey;
 
-    const signature = await this.connection.sendTransaction(
+    const signature = await this.sendAndConfirm(
+      this.connection,
       transaction,
       [adminKeypair],
-      { skipPreflight: false }
+      'finalized'
     );
-
-    await this.connection.confirmTransaction(signature);
 
     logger.info({ signature, roundPda: roundPda.toString(), finalByte }, 'Community outcome revealed');
 
@@ -1262,11 +1390,12 @@ export class TossrProgramService {
       transaction.recentBlockhash = blockhash;
       transaction.feePayer = payer.publicKey;
 
-      const signature = await this.connection.sendTransaction(transaction, [payer], {
-        skipPreflight: false,
-      });
-
-      await this.connection.confirmTransaction(signature, 'finalized');
+      const signature = await this.sendAndConfirm(
+        this.connection,
+        transaction,
+        [payer],
+        'finalized'
+      );
 
       logger.info({ signature, roundPda: roundPda.toString() }, 'Round delegated');
 
@@ -1445,8 +1574,13 @@ export class TossrProgramService {
       const { blockhash } = await this.erConnection.getLatestBlockhash();
       transaction.recentBlockhash = blockhash;
       transaction.feePayer = payer.publicKey;
-      const sig = await this.erConnection.sendTransaction(transaction, [payer], { skipPreflight: true });
-      await this.erConnection.confirmTransaction(sig);
+      const sig = await this.sendAndConfirm(
+        this.erConnection,
+        transaction,
+        [payer],
+        'confirmed',
+        true
+      );
       logger.info({ signature: sig, roundPda: roundPda.toString() }, 'Round state committed');
       return sig;
     } catch (e: any) {
@@ -1507,8 +1641,13 @@ export class TossrProgramService {
       const { blockhash} = await this.erConnection.getLatestBlockhash();
       transaction.recentBlockhash = blockhash;
       transaction.feePayer = payer.publicKey;
-      const sig = await this.erConnection.sendTransaction(transaction, [payer], { skipPreflight: true });
-      await this.erConnection.confirmTransaction(sig);
+      const sig = await this.sendAndConfirm(
+        this.erConnection,
+        transaction,
+        [payer],
+        'confirmed',
+        true
+      );
       logger.info({ signature: sig, roundPda: roundPda.toString() }, 'Round committed and undelegated');
       return sig;
     } catch (e: any) {
@@ -1615,8 +1754,12 @@ export class TossrProgramService {
     const { blockhash } = await this.connection.getLatestBlockhash();
     tx.recentBlockhash = blockhash;
     tx.feePayer = adminKeypair.publicKey;
-    const sig = await this.connection.sendTransaction(tx, [adminKeypair], { skipPreflight: false });
-    await this.connection.confirmTransaction(sig);
+    const sig = await this.sendAndConfirm(
+      this.connection,
+      tx,
+      [adminKeypair],
+      'finalized'
+    );
     return { signature: sig, marketPda };
   }
 

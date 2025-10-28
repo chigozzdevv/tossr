@@ -22,7 +22,9 @@ export interface IRound extends Document {
   revealTxHash?: string
   commitTxHash?: string
   commitStateTxHash?: string
+  baseLayerCommitTxHash?: string
   undelegateTxHash?: string
+  baseLayerUndelegateTxHash?: string
   openTxHash?: string
   createdAt: Date
   updatedAt: Date
@@ -62,7 +64,9 @@ const roundSchema = new Schema<IRound>({
   revealTxHash: { type: String },
   commitTxHash: { type: String },
   commitStateTxHash: { type: String },
+  baseLayerCommitTxHash: { type: String },
   undelegateTxHash: { type: String },
+  baseLayerUndelegateTxHash: { type: String },
   openTxHash: { type: String },
 }, {
   timestamps: true,

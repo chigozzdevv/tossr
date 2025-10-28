@@ -82,13 +82,13 @@ async function processBetSettlementJob(job: Job<SettleBetsJobData>) {
         await new Promise(r => setTimeout(r, 2000 * attempt));
       }
 
-      const undelegateTxHash = await tossrProgram.commitAndUndelegateRound(
+      const { erTxHash, baseTxHash } = await tossrProgram.commitAndUndelegateRoundER(
         marketPubkey,
         round.roundNumber,
         adminKeypair
       );
-      await Round.updateOne({ _id: roundId }, { $set: { undelegateTxHash, settledAt: new Date() } });
-      logger.info({ roundId, undelegateTxHash, attempt }, 'Round committed and undelegated');
+      await Round.updateOne({ _id: roundId }, { $set: { undelegateTxHash: erTxHash, baseLayerUndelegateTxHash: baseTxHash, settledAt: new Date() } });
+      logger.info({ roundId, erTxHash, baseTxHash, attempt }, 'Round committed and undelegated on base layer');
       undelegated = true;
     } catch (e) {
       logger.error({ roundId, err: e, attempt, maxUndelegateAttempts }, `Commit and undelegate failed (attempt ${attempt + 1}/${maxUndelegateAttempts})`);
