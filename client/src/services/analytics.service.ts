@@ -50,25 +50,24 @@ export interface TimeSeriesData {
 
 class AnalyticsService {
   async getOverview(): Promise<OverviewAnalytics> {
-    const response = await api.get('/analytics/overview')
-    return response.data
+    const data = await api.get<OverviewAnalytics>('/analytics/overview')
+    return data
   }
 
   async getTimeSeries(days: number = 14, granularity: 'daily' | 'weekly' = 'daily'): Promise<TimeSeriesData[]> {
-    const response = await api.get('/analytics/timeseries', {
-      params: { days, granularity }
-    })
-    return response.data
+    const query = new URLSearchParams({ days: String(days), granularity })
+    const data = await api.get<TimeSeriesData[]>(`/analytics/timeseries?${query.toString()}`)
+    return data
   }
 
   async getMarketMetrics() {
-    const response = await api.get('/analytics/markets')
-    return response.data
+    const data = await api.get('/analytics/markets')
+    return data
   }
 
   async getUserMetrics() {
-    const response = await api.get('/analytics/users')
-    return response.data
+    const data = await api.get('/analytics/users')
+    return data
   }
 
   // Calculate round-specific analytics from round data

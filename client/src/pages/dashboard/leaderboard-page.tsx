@@ -21,8 +21,8 @@ export function LeaderboardPage() {
   useEffect(() => {
     async function fetchLeaderboard() {
       try {
-        const response = await api.get('/community/leaderboard')
-        setEntries(response.data || [])
+        const data = await api.get<LeaderboardEntry[]>('/community/leaderboard')
+        setEntries(data || [])
       } catch (err) {
         console.error(err)
         setError('Unable to load leaderboard')
