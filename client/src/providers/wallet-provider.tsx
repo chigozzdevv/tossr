@@ -5,7 +5,6 @@ import {
   LedgerWalletAdapter,
   PhantomWalletAdapter,
   SolflareWalletAdapter,
-  TorusWalletAdapter,
 } from '@solana/wallet-adapter-wallets'
 import { WalletAdapterNetwork } from '@solana/wallet-adapter-base'
 import { WalletModal } from '@/components/wallet/wallet-modal'
@@ -34,7 +33,6 @@ export function SolanaWalletProviders({ children }: { children: React.ReactNode 
     () => [
       new PhantomWalletAdapter(),
       new SolflareWalletAdapter({ network: WalletAdapterNetwork.Devnet }),
-      new TorusWalletAdapter(),
       new LedgerWalletAdapter(),
       new CoinbaseWalletAdapter({ network: WalletAdapterNetwork.Devnet }),
     ],

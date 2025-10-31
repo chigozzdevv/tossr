@@ -1,6 +1,8 @@
 import { getSessionToken } from './session'
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000/api/v1'
+const API_BASE_URL =
+  (import.meta as any).env?.VITE_API_URL ??
+  ((import.meta as any).env?.DEV ? 'http://localhost:3001/api/v1' : '/api/v1')
 
 export class ApiError extends Error {
   status: number
