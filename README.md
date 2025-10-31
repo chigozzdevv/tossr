@@ -1,6 +1,17 @@
 # TOSSR.gg
 
-Provably Random Gaming Platform — monorepo containing the web client, backend API, and on-chain programs.
+**TOSSR.gg** is a **provably random gaming platform** where users can bet on different types of random outcomes.  
+The platform ensures fairness by combining three core technologies.  
+**TEE (Trusted Execution Environment)** uses Intel TDX hardware enclaves to privately generate random outcomes.  
+These enclaves produce cryptographic proofs attesting that the correct code ran with the correct inputs, ensuring that even administrators cannot view or tamper with results before they are revealed.  
+**VRF (Verifiable Random Function)**, powered by MagicBlock’s VRF service, generates provably random 32-byte outputs that are requested within Ephemeral Rollups and sent as callbacks to the enclave, making the randomness source cryptographically verifiable.  
+**ER (Ephemeral Rollups)**, also provided by MagicBlock, enable instant, gasless transactions so users can place bets quickly without waiting for block confirmations. The ER also manages VRF request queuing and delegation flows.  
+
+Players can bet on markets such as number ranges, even/odd predictions, pattern matches, and advanced entropy battles.  
+Each round follows a **Predict → Lock → Reveal → Settle** flow: the TEE privately generates outcomes, signs attestations, and the results are verified on-chain through Solana programs before automatic payouts occur.  
+By combining Web2 speed with Web3 transparency, **TOSSR.gg** allows anyone to audit randomness proofs, enclave measurements, and settlement transactions directly on Solana — ensuring a fully fair and verifiable gaming experience.
+
+This monorepo contains the web client, backend API, and on-chain programs.
 
 ## Monorepo layout
 
