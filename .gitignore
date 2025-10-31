@@ -14,6 +14,7 @@ coverage/
 # Node/TypeScript
 node_modules/
 dist/
+temp/
 build/
 *.tsbuildinfo
 
