@@ -89,10 +89,7 @@ export function HowItWorksSection() {
               </motion.div>
             ))}
           </div>
-          <div className="flow-actions" style={{ justifyContent: 'center', marginTop: '1rem' }}>
-            <a href="https://docs.magicblock.gg/TrustedExecutionLayer/PrivateEphemeralRollups" target="_blank" rel="noopener noreferrer" className="chip chip-accent">Learn about PER</a>
-            <a href="#markets" className="chip">Try it now</a>
-          </div>
+          
         </div>
       </div>
     </Section>

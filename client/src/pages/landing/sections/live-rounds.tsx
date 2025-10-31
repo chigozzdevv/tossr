@@ -316,9 +316,6 @@ export function LiveRoundsSection() {
           <div
             className="live-round-grid"
             style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
-              gap: '1.5rem',
               marginTop: '1.5rem'
             }}
           >

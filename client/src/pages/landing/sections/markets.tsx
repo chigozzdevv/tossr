@@ -317,7 +317,7 @@ export function MarketsSection() {
       <div className="container">
         <SectionHeader title="Markets" sub="Explore odds and betting options across all market types" />
 
-        {/* Tabs + controls on one line */}
+        {/* Tabs row */}
         <div className="markets-header-row">
           <nav className="markets-tabs-horizontal" role="tablist" aria-label="Market types">
             {MARKET_TABS.map(tab => {
@@ -336,24 +336,24 @@ export function MarketsSection() {
               )
             })}
           </nav>
-          <div className="markets-header-controls">
-            <button className="carousel-btn prev" aria-label="Previous" onClick={() => scrollByCards(-1)}>
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M15 6l-6 6 6 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
-            </button>
-            <button className="carousel-btn next" aria-label="Next" onClick={() => scrollByCards(1)}>
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M9 18l6-6-6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
-            </button>
-          </div>
         </div>
 
         {/* Active market header removed per request */}
 
-        {/* Options row */}
+        {/* Options carousel with aligned controls */}
         {activeMarket && (
-          <div className="carousel-track" ref={trackRef}>
-            {activeMarket.options.map((option, idx) => (
-              <BetOptionCard key={option.id} option={option} index={idx} />
-            ))}
+          <div className="markets-carousel">
+            <button className="carousel-btn prev" aria-label="Previous" onClick={() => scrollByCards(-1)}>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M15 6l-6 6 6 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+            </button>
+            <div className="carousel-track" ref={trackRef}>
+              {activeMarket.options.map((option, idx) => (
+                <BetOptionCard key={option.id} option={option} index={idx} />
+              ))}
+            </div>
+            <button className="carousel-btn next" aria-label="Next" onClick={() => scrollByCards(1)}>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M9 18l6-6-6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+            </button>
           </div>
         )}
 

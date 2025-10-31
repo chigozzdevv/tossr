@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 type Phase = 'field' | 'gather' | 'scatter'
 
@@ -25,6 +25,7 @@ function createRng(seed = 0xA5F12E31) {
 }
 
 export function ParticleField() {
+  const [enabled, setEnabled] = useState(true)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const phaseRef = useRef<Phase>('gather')
   const particlesRef = useRef<Particle[]>([])
@@ -37,10 +38,33 @@ export function ParticleField() {
   const frameRef = useRef<number>(0)
   const pausedRef = useRef<boolean>(false)
   const lastTsRef = useRef<number>(0)
+  const isMobileRef = useRef<boolean>(false)
+  const fpsIntervalRef = useRef<number>(1000 / 45)
+  const prefersReducedRef = useRef<boolean>(false)
+
+  // Disable particles on small screens and when user prefers reduced motion
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const mqMobile = window.matchMedia('(max-width: 640px)')
+    const mqReduced = window.matchMedia('(prefers-reduced-motion: reduce)')
+    const update = () => setEnabled(!(mqMobile.matches || mqReduced.matches))
+    update()
+    mqMobile.addEventListener?.('change', update)
+    mqReduced.addEventListener?.('change', update)
+    return () => {
+      mqMobile.removeEventListener?.('change', update)
+      mqReduced.removeEventListener?.('change', update)
+    }
+  }, [])
 
   useEffect(() => {
+    if (!enabled) return
     const canvas = canvasRef.current!
     const ctx = canvas.getContext('2d', { alpha: true })!
+    const mql = window.matchMedia('(prefers-reduced-motion: reduce)')
+    const setReduced = () => { prefersReducedRef.current = !!mql.matches }
+    setReduced()
+    mql.addEventListener?.('change', setReduced)
 
     const onResize = () => {
       const realDpr = window.devicePixelRatio || 1
@@ -49,6 +73,8 @@ export function ParticleField() {
       const h = Math.floor((rect?.height || window.innerHeight))
       let dpr = Math.min(1.5, realDpr)
       if (w <= 480 || (w * h) > 1_400_000) dpr = 1
+      isMobileRef.current = w <= 640
+      fpsIntervalRef.current = prefersReducedRef.current || isMobileRef.current ? (1000 / 30) : (1000 / 45)
       canvas.width = Math.floor(w * dpr)
       canvas.height = Math.floor(h * dpr)
       canvas.style.width = w + 'px'
@@ -64,8 +90,9 @@ export function ParticleField() {
       const base = Math.floor((w * h) / 14000)
       const cap = 300
       let count = Math.min(cap, base)
-      if (w <= 480) count = Math.floor(count * 0.5)
-      else if (w <= 768) count = Math.floor(count * 0.7)
+      if (w <= 480) count = Math.floor(count * 0.4)
+      else if (w <= 768) count = Math.floor(count * 0.65)
+      if (prefersReducedRef.current) count = Math.floor(count * 0.5)
       const arr: Particle[] = []
       for (let i = 0; i < count; i++) {
         arr.push({
@@ -73,7 +100,7 @@ export function ParticleField() {
           y: rng.current() * h,
           vx: (rng.current() - 0.5) * 0.25,
           vy: (rng.current() - 0.5) * 0.25,
-          r: rng.current() * 1.0 + 0.5,
+          r: rng.current() * (isMobileRef.current ? 0.9 : 1.0) + 0.4,
           tx: 0,
           ty: 0,
         })
@@ -114,7 +141,7 @@ export function ParticleField() {
     const tick = (ts?: number) => {
       if (hiddenRef.current || pausedRef.current) { rafRef.current = null; return }
       const now = ts ?? performance.now()
-      const fpsInterval = 1000 / 45
+      const fpsInterval = fpsIntervalRef.current
       if (now - lastTsRef.current < fpsInterval) {
         rafRef.current = requestAnimationFrame(tick)
         return
@@ -130,7 +157,7 @@ export function ParticleField() {
       const mint = colorRef.current
       ctx.fillStyle = mint
       ctx.shadowColor = mint
-      ctx.shadowBlur = 2
+      ctx.shadowBlur = isMobileRef.current || prefersReducedRef.current ? 1 : 2
 
       tRef.current += 0.016
       ctx.beginPath()
@@ -175,7 +202,7 @@ export function ParticleField() {
       ctx.fill()
 
       frameRef.current++
-      if ((frameRef.current & 1) === 0) {
+      if (!isMobileRef.current && !prefersReducedRef.current && (frameRef.current & 1) === 0) {
         ctx.shadowBlur = 0
         ctx.globalAlpha = 0.18
         ctx.strokeStyle = mint
@@ -233,7 +260,8 @@ export function ParticleField() {
       document.removeEventListener('visibilitychange', onVisibility)
       window.removeEventListener('resize', onResize)
     }
-  }, [])
+  }, [enabled])
 
+  if (!enabled) return null
   return <canvas ref={canvasRef} aria-hidden className="particle-wrap" />
 }

@@ -29,11 +29,11 @@ export function Hero() {
             TEE-attested randomness via MagicBlock PER + VRF for range, parity, digit,
             modulo, pattern, jackpot and community markets — all settled in SOL on Solana.
           </p>
-          <div className="row row-center">
+          <div className="row row-center hero-cta">
             <button className="btn btn-primary" onClick={handleConnect} disabled={loading}>
               {loading ? 'Connecting…' : 'Connect Wallet'}
             </button>
-            <Button className="hidden sm:inline-flex" aria-label="View live rounds" asChild>
+            <Button aria-label="View live rounds" asChild>
               <a href="#live-rounds">View live rounds</a>
             </Button>
           </div>
