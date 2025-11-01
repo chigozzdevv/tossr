@@ -210,12 +210,6 @@ export class RoundsService {
     const r = await Round.findOne({ marketId, roundNumber }, { _id: 1 }).lean();
     logger.info({ roundId: String(r?._id), roundNumber, signature }, 'Round opened');
 
-    try {
-      await this.delegateRoundToER(String(r?._id), marketPubkey);
-    } catch (e) {
-      logger.error({ roundId: String(r?._id), err: e }, 'Delegation failed');
-    }
-
     const final = await Round.findOne({ marketId, roundNumber }).lean();
     if (!final) return null as any;
     return {
@@ -394,6 +388,7 @@ export class RoundsService {
     }
 
     await this.prepareOutcome(roundId);
+    await this.delegateRoundToER(roundId, marketPubkey);
 
     const refreshedRound = await Round.findById(roundId).lean();
 
@@ -414,7 +409,6 @@ export class RoundsService {
     const marketPubkey = new PublicKey(marketConfig.solanaAddress);
 
     const oracleQueue = new PublicKey(config.VRF_ORACLE_QUEUE);
-    const isDelegated = Boolean((round as any).delegateTxHash && !(round as any).undelegateTxHash);
     const clientSeed = round.roundNumber % 256;
 
     try {
@@ -424,7 +418,7 @@ export class RoundsService {
         clientSeed,
         adminKeypair,
         oracleQueue,
-        { useER: isDelegated }
+        { useER: false }
       );
       logger.info({ roundId, roundNumber: round.roundNumber }, 'VRF randomness requested');
     } catch (error: any) {

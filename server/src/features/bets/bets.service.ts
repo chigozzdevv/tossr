@@ -195,28 +195,7 @@ export class BetsService {
       logger.warn({ err: e, txSignature }, 'Failed to parse stake from transaction; using client-provided stake');
     }
 
-    if (!decodedFromTx && betAccountInfo) {
-      try {
-        const decodedBet = tossrProgram.decodeBetAccount(betAccountInfo.data);
-        if (decodedBet?.stake) {
-          const stakeFromAccount = toNumber(decodedBet.stake);
-          if (stakeFromAccount > 0) {
-            finalStake = stakeFromAccount;
-          }
-        }
-        if (decodedBet?.selection) {
-          const sel = decodedBet.selection;
-          decodedFromTx = {
-            kind: toNumber(sel.kind),
-            a: toNumber(sel.a),
-            b: toNumber(sel.b),
-            c: toNumber(sel.c),
-          };
-        }
-      } catch (err) {
-        logger.warn({ err, betPda }, 'Failed to decode bet account; falling back to client payload');
-      }
-    }
+    
 
     const cfg = getMarketConfig((round.marketId as any).config as unknown) as any;
     const houseEdgeBps: number = typeof cfg?.houseEdgeBps === 'number' ? cfg.houseEdgeBps : 0;
