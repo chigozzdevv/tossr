@@ -1061,7 +1061,7 @@ export class TossrProgramService {
         { pubkey: payer.publicKey, isSigner: true, isWritable: true },
         { pubkey: marketId, isSigner: false, isWritable: false },
         { pubkey: roundPda, isSigner: false, isWritable: true },
-        { pubkey: oracleQueue, isSigner: false, isWritable: false },
+        { pubkey: oracleQueue, isSigner: false, isWritable: true },
         { pubkey: PROGRAM_IDENTITY_PDA, isSigner: false, isWritable: false },
         { pubkey: VRF_PROGRAM_PK, isSigner: false, isWritable: false },
         { pubkey: SYSVAR_SLOT_HASHES_PUBKEY, isSigner: false, isWritable: false },
