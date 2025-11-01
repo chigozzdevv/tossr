@@ -13,7 +13,7 @@ async function main() {
     const i = args.findIndex(a => a === `--${k}` || a.startsWith(`--${k}=`))
     if (i === -1) return undefined
     const v = args[i]
-    if (v.includes('=')) return v.split('=')[1]
+    if (v && v.includes('=')) return v.split('=')[1]
     return args[i + 1]
   }
 
