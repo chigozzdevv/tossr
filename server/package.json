@@ -6,7 +6,7 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsc && tsc-alias -p tsconfig.json",
+    "build": "tsc && tsc-alias -p tsconfig.json && cp -r src/idl dist/idl",
     "start": "node dist/server.js",
     "markets:create": "tsx src/scripts/create-market.ts",
     "markets:mint:sol": "npm run markets:create -- --mint=So11111111111111111111111111111111111111112 --edge=200",
