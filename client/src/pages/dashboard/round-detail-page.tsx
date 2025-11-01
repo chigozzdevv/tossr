@@ -673,7 +673,6 @@ export function RoundDetailPage() {
               <span className="dashboard-round-stat-label">Transaction</span>
               <code className="dashboard-code" style={{ display: 'block', marginTop: '0.4rem', wordBreak: 'break-all' }}>{confirmedSig}</code>
               <div style={{ marginTop: '0.6rem', display: 'flex', gap: '0.6rem', flexWrap: 'wrap' }}>
-                <a href={`https://explorer.solana.com/tx/${confirmedSig}?cluster=devnet`} target="_blank" rel="noreferrer" className="link">View on Explorer</a>
                 <button className="link" onClick={() => { navigator.clipboard.writeText(confirmedSig).catch(() => {}); }}>Copy Hash</button>
               </div>
             </div>

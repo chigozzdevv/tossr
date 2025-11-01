@@ -53,5 +53,6 @@ async function handleUndelegateRound(data: UndelegateRoundJobData) {
 
 export const roundLifecycleWorker = createWorker(
   'round-lifecycle',
-  processRoundLifecycleJob
+  processRoundLifecycleJob,
+  { concurrency: 1 }
 );
