@@ -86,6 +86,18 @@ export function RoundDetailPage() {
   const { connection } = useConnection()
   const lastConfirmedSigRef = useRef<string>('')
   const confirmingRef = useRef<boolean>(false)
+  const getExplorerCluster = useCallback(() => {
+    const url = config.SOLANA_RPC_URL || ''
+    if (/testnet/i.test(url)) return 'testnet'
+    if (/mainnet/i.test(url)) return 'mainnet'
+    return 'devnet'
+  }, [])
+  const explorerTxUrl = useMemo(() => {
+    if (!confirmedSig) return '#'
+    const cluster = getExplorerCluster()
+    const base = 'https://explorer.solana.com/tx/'
+    return `${base}${confirmedSig}?cluster=${encodeURIComponent(cluster)}`
+  }, [confirmedSig, getExplorerCluster])
 
   useEffect(() => {
     async function load() {
@@ -673,7 +685,28 @@ export function RoundDetailPage() {
               <span className="dashboard-round-stat-label">Transaction</span>
               <code className="dashboard-code" style={{ display: 'block', marginTop: '0.4rem', wordBreak: 'break-all' }}>{confirmedSig}</code>
               <div style={{ marginTop: '0.6rem', display: 'flex', gap: '0.6rem', flexWrap: 'wrap' }}>
-                <button className="link" onClick={() => { navigator.clipboard.writeText(confirmedSig).catch(() => {}); }}>Copy Hash</button>
+                <a className="link" href={explorerTxUrl} target="_blank" rel="noreferrer">View on Explorer</a>
+                <button
+                  aria-label="Copy transaction hash"
+                  title="Copy transaction hash"
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    width: 36,
+                    height: 36,
+                    borderRadius: 8,
+                    border: '1px solid var(--border)',
+                    background: 'transparent',
+                    cursor: 'pointer'
+                  }}
+                  onClick={() => { navigator.clipboard.writeText(confirmedSig).catch(() => {}); }}
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <rect x="9" y="9" width="10" height="12" rx="2" stroke="currentColor" strokeWidth="2"/>
+                    <rect x="5" y="3" width="10" height="12" rx="2" stroke="currentColor" strokeWidth="2"/>
+                  </svg>
+                </button>
               </div>
             </div>
 

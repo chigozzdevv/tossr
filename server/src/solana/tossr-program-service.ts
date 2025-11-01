@@ -31,6 +31,10 @@ import { DISCRIMINATORS } from '@/utils/anchor-discriminators';
 import { BorshCoder, Idl } from '@coral-xyz/anchor';
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const TOSSR_PROGRAM_ID = new PublicKey(config.TOSSR_ENGINE_PROGRAM_ID);
 const DELEGATION_PROGRAM_PK = new PublicKey(config.DELEGATION_PROGRAM_ID);
