@@ -66,6 +66,7 @@
     "@typescript-eslint/parser": "^8.46.1",
     "@vitest/ui": "^3.2.4",
     "eslint": "^9.38.0",
+    "tsc-alias": "^1.8.16",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
     "vitest": "^3.2.4"
