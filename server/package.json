@@ -5,7 +5,7 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsc",
+    "build": "tsc && tsc-alias",
     "start": "node dist/server.js",
     "markets:create": "tsx src/scripts/create-market.ts",
     "markets:import-legacy": "tsx src/scripts/import-legacy-markets.ts",
