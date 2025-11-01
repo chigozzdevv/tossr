@@ -36,6 +36,28 @@ async function processBetSettlementJob(job: Job<SettleBetsJobData>) {
   const marketPubkey = new PublicKey(marketCfg.solanaAddress);
   const mint = new PublicKey(marketCfg.mintAddress);
 
+  const isDelegated = Boolean((round as any).delegateTxHash && !(round as any).undelegateTxHash);
+
+  if (isDelegated) {
+    const maxUndelegateAttempts = 3;
+    let undelegated = false;
+    for (let attempt = 0; attempt < maxUndelegateAttempts && !undelegated; attempt++) {
+      try {
+        if (attempt > 0) await new Promise(r => setTimeout(r, 1500 * attempt));
+        const { erTxHash, baseTxHash } = await tossrProgram.commitAndUndelegateRoundER(
+          marketPubkey,
+          (round as any).roundNumber,
+          adminKeypair
+        );
+        await Round.updateOne({ _id: roundId }, { $set: { undelegateTxHash: erTxHash, baseLayerUndelegateTxHash: baseTxHash } });
+        logger.info({ roundId, erTxHash, baseTxHash, attempt }, 'Round undelegated before settlement');
+        undelegated = true;
+      } catch (e) {
+        logger.warn({ roundId, attempt, err: e }, 'Undelegate before settlement failed; retrying');
+      }
+    }
+  }
+
   for (const bet of pendingBets as any[]) {
     const won = checkBetWon(bet.selection as any, outcome, (round as any).marketId.type);
     const payout = won ? Number(bet.stake) * Number(bet.odds) : 0;
@@ -60,6 +82,16 @@ async function processBetSettlementJob(job: Job<SettleBetsJobData>) {
     // Update leaderboard
     if (won) {
       await updateLeaderboard(String(bet.userId._id ?? bet.userId), Number(bet.stake), payout);
+    } else {
+      // ensure totalBets/totalStake tracked for losses too
+      await LeaderboardEntry.findOneAndUpdate(
+        { userId: bet.userId._id ?? bet.userId },
+        {
+          $setOnInsert: { userId: bet.userId._id ?? bet.userId, totalBets: 0, totalWon: 0, totalStake: 0, totalPayout: 0, winRate: 0, streak: 0 },
+          $inc: { totalBets: 1, totalStake: Number(bet.stake) },
+        },
+        { upsert: true }
+      );
     }
 
     logger.info({ betId: bet._id, won, payout }, 'Bet settled (on-chain + DB)');
@@ -73,29 +105,28 @@ async function processBetSettlementJob(job: Job<SettleBetsJobData>) {
     logger.error({ roundId, err: e }, 'On-chain round settle failed');
   }
 
-  const maxUndelegateAttempts = 3;
-  let undelegated = false;
-
-  for (let attempt = 0; attempt < maxUndelegateAttempts && !undelegated; attempt++) {
-    try {
-      if (attempt > 0) {
-        await new Promise(r => setTimeout(r, 2000 * attempt));
-      }
-
-      const { erTxHash, baseTxHash } = await tossrProgram.commitAndUndelegateRoundER(
-        marketPubkey,
-        round.roundNumber,
-        adminKeypair
-      );
-      await Round.updateOne({ _id: roundId }, { $set: { undelegateTxHash: erTxHash, baseLayerUndelegateTxHash: baseTxHash, settledAt: new Date() } });
-      logger.info({ roundId, erTxHash, baseTxHash, attempt }, 'Round committed and undelegated on base layer');
-      undelegated = true;
-    } catch (e) {
-      logger.error({ roundId, err: e, attempt, maxUndelegateAttempts }, `Commit and undelegate failed (attempt ${attempt + 1}/${maxUndelegateAttempts})`);
-
-      if (attempt === maxUndelegateAttempts - 1) {
-        await Round.updateOne({ _id: roundId }, { $set: { settledAt: new Date() } });
-        logger.error({ roundId }, 'CRITICAL: Round failed to undelegate after all retries');
+  // If still delegated for any reason, attempt undelegation now
+  const stillDelegated = Boolean((await Round.findById(roundId).lean() as any)?.delegateTxHash && !(await Round.findById(roundId).lean() as any)?.undelegateTxHash);
+  if (stillDelegated) {
+    const maxUndelegateAttempts = 3;
+    let undelegated = false;
+    for (let attempt = 0; attempt < maxUndelegateAttempts && !undelegated; attempt++) {
+      try {
+        if (attempt > 0) await new Promise(r => setTimeout(r, 2000 * attempt));
+        const { erTxHash, baseTxHash } = await tossrProgram.commitAndUndelegateRoundER(
+          marketPubkey,
+          (round as any).roundNumber,
+          adminKeypair
+        );
+        await Round.updateOne({ _id: roundId }, { $set: { undelegateTxHash: erTxHash, baseLayerUndelegateTxHash: baseTxHash, settledAt: new Date() } });
+        logger.info({ roundId, erTxHash, baseTxHash, attempt }, 'Round committed and undelegated on base layer');
+        undelegated = true;
+      } catch (e) {
+        logger.error({ roundId, err: e, attempt, maxUndelegateAttempts }, `Commit and undelegate failed (attempt ${attempt + 1}/${maxUndelegateAttempts})`);
+        if (attempt === maxUndelegateAttempts - 1) {
+          await Round.updateOne({ _id: roundId }, { $set: { settledAt: new Date() } });
+          logger.error({ roundId }, 'CRITICAL: Round failed to undelegate after all retries');
+        }
       }
     }
   }

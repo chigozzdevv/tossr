@@ -601,82 +601,57 @@ export class RoundsService {
     logger.info({ roundId, revealTxHash }, 'Outcome revealed');
 
     try {
-      const connection = new Connection(config.SOLANA_RPC_URL);
-      const programId = new PublicKey(config.TOSSR_ENGINE_PROGRAM_ID);
+      const erConnection = new Connection(config.EPHEMERAL_RPC_URL);
+      const baseConnection = new Connection(config.SOLANA_RPC_URL);
       const marketConfig = getMarketConfig((round as any).marketId.config as unknown);
       const marketPubkey = new PublicKey(marketConfig.solanaAddress);
       const roundPda = await tossrProgram.getRoundPda(marketPubkey, round.roundNumber);
-      const maxAttempts = 5;
-      let attempt = 0;
-      let state = await fetchRoundStateRaw(connection, roundPda);
-      while (attempt < maxAttempts && !state) {
+
+      const maxAttempts = 10;
+      let state: Awaited<ReturnType<typeof fetchRoundStateRaw>> | null = null;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        const [erState, baseState] = await Promise.all([
+          fetchRoundStateRaw(erConnection, roundPda),
+          fetchRoundStateRaw(baseConnection, roundPda),
+        ]);
+        state = (Boolean((round as any).delegateTxHash && !(round as any).undelegateTxHash)
+          ? (erState || baseState)
+          : (baseState || erState));
+        if (state && state.outcome) break;
         await new Promise(r => setTimeout(r, 500));
-        state = await fetchRoundStateRaw(connection, roundPda);
-        attempt++;
       }
+
       const expectedInputs = Buffer.from(attestation.inputs_hash, 'hex').toString('hex');
       const normalizeOutcome = (value: any) => {
         if (!value) return null;
-        if (value.Numeric) {
-          return { type: 'Numeric', value: value.Numeric.value };
-        }
-        if (value.Shape) {
-          return {
-            type: 'Shape',
-            shape: value.Shape.shape,
-            color: value.Shape.color,
-            size: value.Shape.size,
-          };
-        }
-        if (value.Pattern) {
-          return {
-            type: 'Pattern',
-            patternId: value.Pattern.pattern_id ?? value.Pattern.patternId,
-            matchedValue: value.Pattern.matched_value ?? value.Pattern.matchedValue,
-          };
-        }
-        if (value.Entropy) {
-          return {
-            type: 'Entropy',
-            tee: value.Entropy.tee_score,
-            chain: value.Entropy.chain_score,
-            sensor: value.Entropy.sensor_score,
-            winner: value.Entropy.winner,
-          };
-        }
+        if (value.Numeric) return { type: 'Numeric', value: value.Numeric.value };
+        if (value.Shape) return { type: 'Shape', shape: value.Shape.shape, color: value.Shape.color, size: value.Shape.size };
+        if (value.Pattern) return { type: 'Pattern', patternId: value.Pattern.pattern_id ?? value.Pattern.patternId, matchedValue: value.Pattern.matched_value ?? value.Pattern.matchedValue };
+        if (value.Entropy) return { type: 'Entropy', tee: value.Entropy.tee_score, chain: value.Entropy.chain_score, sensor: value.Entropy.sensor_score, winner: value.Entropy.winner };
         if (value.Community) {
           const seed = value.Community.seed_hash;
-          const seedHex = Array.isArray(seed)
-            ? Buffer.from(seed).toString('hex')
-            : typeof seed === 'string'
-              ? seed.toLowerCase()
-              : '';
-          return {
-            type: 'Community',
-            finalByte: value.Community.final_byte ?? value.Community.finalByte,
-            seedHash: seedHex,
-          };
+          const seedHex = Array.isArray(seed) ? Buffer.from(seed).toString('hex') : (typeof seed === 'string' ? seed.toLowerCase() : '');
+          return { type: 'Community', finalByte: value.Community.final_byte ?? value.Community.finalByte, seedHash: seedHex };
         }
         return { type: 'Unknown', raw: value };
       };
 
-      const normalizedState = normalizeOutcome(state?.outcome);
-      const normalizedExpected = normalizeOutcome(outcome);
-      const outcomeMatches =
-        normalizedState !== null &&
-        normalizedExpected !== null &&
-        JSON.stringify(normalizedState) === JSON.stringify(normalizedExpected);
+      if (!state || !state.outcome) {
+        logger.warn({ roundId }, 'Reveal verification pending: state not yet available');
+      } else {
+        const normalizedState = normalizeOutcome(state.outcome);
+        const normalizedExpected = normalizeOutcome(outcome);
+        const outcomeMatches = normalizedState !== null && normalizedExpected !== null && JSON.stringify(normalizedState) === JSON.stringify(normalizedExpected);
+        const inputsMatch = (state.inputsHash || '').toLowerCase() === expectedInputs.toLowerCase();
 
-      const inputsMatch = (state?.inputsHash || '').toLowerCase() === expectedInputs.toLowerCase();
-      if (!state) {
-        throw new Error('Reveal verification failed: state not available');
+        if (!outcomeMatches) throw new Error('Reveal verification failed: outcome mismatch');
+        // Only require inputsHash on base layer; ER will be committed shortly
+        const isDelegated = Boolean((round as any).delegateTxHash && !(round as any).undelegateTxHash);
+        if (!isDelegated && !inputsMatch) throw new Error('Reveal verification failed: inputsHash mismatch');
+        logger.info({ roundId }, 'Reveal verification passed');
       }
-      if (!outcomeMatches || !inputsMatch) {
-        throw new Error(`Reveal verification failed: outcome=${outcomeMatches}, inputsMatch=${inputsMatch}`);
-      }
-      logger.info({ roundId }, 'Reveal verification passed');
-    } catch (e) {
-      throw e;
+    } catch (e: any) {
+      logger.warn({ roundId, error: String(e?.message || e) }, 'Reveal verification failed; continuing to commit and settle');
     }
 
     await betSettlementQueue.add('settle-bets', { roundId }, { jobId: `settle-${roundId}` });

@@ -5,7 +5,7 @@ TOSSR.gg is a provably-fair gaming platform on Solana that combines:
 - MagicBlock VRF for verifiable 32‑byte randomness
 - TEE (Trusted Execution Environment) for private outcome generation with attestations
 
-Each betting round follows: Predict → Lock → Reveal → Settle. Rounds can be delegated to ER for fast betting and reveal, then anchored back to Solana’s base layer for durability.
+Each betting round follows: Predict → Lock → Reveal → Settle. We use base-first flow for user bets and VRF (to interop with base-native ops like ATA creation), then leverage ER for fast reveal and settlement, and finally anchor state back to Solana base.
 
 ## Monorepo Layout
 
@@ -18,9 +18,8 @@ Each betting round follows: Predict → Lock → Reveal → Settle. Rounds can b
 
 ## Architecture Overview
 
-1) Predict
-- Client requests a bet transaction from the server.
-- If the round is delegated, the transaction is submitted via ER for fast confirmation.
+1) Predict (base-first)
+- Client requests a bet transaction from the server and submits on base (SOLANA_RPC_URL). Base-native ops (e.g., minting ATAs) work seamlessly.
 
 2) Lock
 - Server locks the round on-chain (ER when delegated, base otherwise).
