@@ -13,6 +13,15 @@ type LeaderboardEntry = {
   streak: number
 }
 
+type ApiResponse<T> = { success: boolean; data: T; message?: string }
+type ServerLeaderboardItem = {
+  rank: number
+  user?: { id: string; walletAddress: string }
+  totalWins?: number
+  totalParticipations?: number
+  winRate?: number
+}
+
 export function LeaderboardPage() {
   const [entries, setEntries] = useState<LeaderboardEntry[]>([])
   const [loading, setLoading] = useState(true)
@@ -21,8 +30,20 @@ export function LeaderboardPage() {
   useEffect(() => {
     async function fetchLeaderboard() {
       try {
-        const data = await api.get<LeaderboardEntry[]>('/community/leaderboard')
-        setEntries(data || [])
+        const res = await api.get<ApiResponse<ServerLeaderboardItem[]>>('/community/leaderboard')
+        const items = Array.isArray(res?.data) ? res.data : []
+        const mapped: LeaderboardEntry[] = items.map((e, idx) => ({
+          rank: e.rank ?? idx + 1,
+          userId: e.user?.id ?? '',
+          walletAddress: e.user?.walletAddress ?? '',
+          totalBets: e.totalParticipations ?? 0,
+          totalWon: e.totalWins ?? 0,
+          totalStake: 0,
+          totalPayout: 0,
+          winRate: e.winRate ?? 0,
+          streak: 0,
+        }))
+        setEntries(mapped)
       } catch (err) {
         console.error(err)
         setError('Unable to load leaderboard')
