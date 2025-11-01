@@ -86,6 +86,7 @@ export function BetsPage() {
               <thead>
                 <tr>
                   <th>Market</th>
+                  <th>Round ID</th>
                   <th>Round</th>
                   <th>Status</th>
                   <th>Selection</th>
@@ -95,11 +96,28 @@ export function BetsPage() {
                 </tr>
               </thead>
               <tbody>
-                {bets.map((bet) => (
+                {bets.map((bet) => {
+                  const roundDoc: any = (bet as any).round ?? (bet as any).roundId ?? null;
+                  const roundIdStr = typeof (bet as any).roundId === 'string'
+                    ? (bet as any).roundId
+                    : (roundDoc?._id ? String(roundDoc._id) : (roundDoc?.id ?? '—'));
+                  const roundNo = roundDoc?.roundNumber;
+                  const marketName = roundDoc?.market?.name ?? roundDoc?.marketId?.name ?? bet.marketId;
+                  const status = bet.status;
+                  return (
                   <tr key={bet.id}>
-                    <td>{bet.round?.market.name ?? bet.marketId}</td>
-                    <td>{bet.round ? `#${bet.round.roundNumber}` : '—'}</td>
-                    <td>{bet.status}</td>
+                    <td>{marketName}</td>
+                    <td><code className="dashboard-code">{roundIdStr}</code></td>
+                    <td>{roundNo ? `#${roundNo}` : '—'}</td>
+                    <td>
+                      {status === 'PENDING' ? (
+                        <span style={{display:'inline-flex',alignItems:'center',gap:'0.4rem'}}>
+                          <span className="loading-spinner" style={{width:12,height:12,borderWidth:2}} /> Pending
+                        </span>
+                      ) : (
+                        status
+                      )}
+                    </td>
                     <td>
                       <code className="dashboard-code">{JSON.stringify(bet.selection)}</code>
                     </td>
@@ -107,7 +125,7 @@ export function BetsPage() {
                     <td>{bet.payout ? bet.payout / 1_000_000_000 : 0}</td>
                     <td>{new Date(bet.createdAt).toLocaleString()}</td>
                   </tr>
-                ))}
+                )})}
               </tbody>
             </table>
           </div>

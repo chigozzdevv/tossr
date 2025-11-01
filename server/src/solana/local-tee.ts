@@ -233,8 +233,9 @@ export async function generateOutcomeLocal(
   const commitmentDigest = createHash('sha256').update(outcomeBytes).update(nonceBytes).digest();
   const commitment = commitmentDigest.toString('hex');
 
-  const tupleJson = JSON.stringify([roundId, marketType, outcome]);
-  const inputsHash = createHash('sha256').update(ENC.encode(tupleJson)).digest();
+  const inputsHash = params.vrfRandomness && params.vrfRandomness.length === 32
+    ? Buffer.from(params.vrfRandomness)
+    : createHash('sha256').update(ENC.encode(JSON.stringify([roundId, marketType, outcome]))).digest();
   const signature = await signAsync(commitmentDigest, privKey, { prehash: false });
   const publicKey = getPublicKey(privKey, false);
 

@@ -35,11 +35,11 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max)
 }
 
-function deriveTimeMeta(openedAt?: string) {
-  if (!openedAt) {
+function deriveTimeMeta(baseAt?: string) {
+  if (!baseAt) {
     return { label: 'Pending', ratio: 0 }
   }
-  const opened = new Date(openedAt).getTime()
+  const opened = new Date(baseAt).getTime()
   const now = Date.now()
   const elapsed = clamp(now - opened, 0, ROUND_DURATION_MS)
   const ratio = ROUND_DURATION_MS === 0 ? 0 : elapsed / ROUND_DURATION_MS
@@ -54,10 +54,11 @@ function deriveTimeMeta(openedAt?: string) {
 
 function buildSelectionEntries(round: Round): RoundSelectionEntry[] {
   const options = buildRoundOptions(round)
-  const { label: timeLeftLabel, ratio: timeRatio } = deriveTimeMeta(round.openedAt)
+  const baseAt = round.scheduledReleaseAt || round.openedAt
+  const { label: timeLeftLabel, ratio: timeRatio } = deriveTimeMeta(baseAt)
   const bets = round._count?.bets ?? 0
-  const opened = round.openedAt ? new Date(round.openedAt).getTime() : Date.now()
-  const endsAt = new Date(opened + ROUND_DURATION_MS)
+  const start = baseAt ? new Date(baseAt).getTime() : Date.now()
+  const endsAt = new Date(start + ROUND_DURATION_MS)
 
   return options.map((option, idx) => ({
     id: `${round.id}-${option.id}`,
@@ -147,9 +148,9 @@ export function RoundsPage() {
   const entries = useMemo(() => {
     const active = rounds.filter((round) => {
       if (round.status !== 'PREDICTING') return false
-      if (!round.openedAt) return false
-      
-      const opened = new Date(round.openedAt).getTime()
+      const baseAt = round.scheduledReleaseAt || round.openedAt
+      if (!baseAt) return false
+      const opened = new Date(baseAt).getTime()
       const now = Date.now()
       const timeLeft = opened + ROUND_DURATION_MS - now
       

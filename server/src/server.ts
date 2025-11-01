@@ -49,10 +49,11 @@ async function bootstrap() {
 
     await connectDatabase();
     await connectRedis();
-    await initializeJobs();
 
     const port = Number(config.PORT);
     await app.listen({ port, host: '0.0.0.0' });
+
+    await initializeJobs();
 
     logger.info(`🚀 TOSSR.gg server running on port ${port}`);
     logger.info(`>> API documentation available at http://localhost:${port}/docs`);

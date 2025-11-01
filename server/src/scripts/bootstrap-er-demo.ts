@@ -12,15 +12,8 @@
 import 'dotenv/config';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import path from 'path';
-import {
-  Connection,
-  Keypair,
-  LAMPORTS_PER_SOL,
-  PublicKey,
-  SystemProgram,
-  Transaction,
-  Message,
-} from '@solana/web3.js';
+import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction, sendAndConfirmTransaction } from '@solana/web3.js';
+import { ConnectionMagicRouter } from '@magicblock-labs/ephemeral-rollups-sdk';
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
   NATIVE_MINT,
@@ -64,9 +57,11 @@ async function main() {
   await connectRedis();
 
   try {
-    // 0. Clear existing rounds to ensure clean bootstrap
-    const removed = await Round.deleteMany({});
-    logger.info({ removed: removed.deletedCount }, 'Cleared existing rounds');
+    const shouldReset = process.env.BOOTSTRAP_RESET === 'true';
+    if (shouldReset) {
+      const removed = await Round.deleteMany({});
+      logger.info({ removed: removed.deletedCount }, 'Cleared existing rounds');
+    }
 
     // 1. Load or generate bettor wallet
     const { bettor, keyPath, created } = loadOrCreateBettorKeypair();
@@ -134,13 +129,7 @@ async function main() {
       throw new Error('Failed to obtain an active predicting round after release');
     }
 
-    logger.info(
-      {
-        roundId: String(roundDoc._id),
-        roundNumber: roundDoc.roundNumber,
-      },
-      'Active round ready (delegation skipped)',
-    );
+    logger.info({ roundId: String(roundDoc._id), roundNumber: roundDoc.roundNumber }, 'Active round ready');
 
     const refreshedRound = await Round.findById(roundDoc._id).lean();
     if (!refreshedRound) {
@@ -213,18 +202,32 @@ async function main() {
     );
 
     const txBytes = Buffer.from(payload.transaction, 'base64');
-
     const tx = Transaction.from(txBytes);
     tx.feePayer = bettor.publicKey;
-    const blockhashResult = await rpcRequest(appConfig.SOLANA_RPC_URL, 'getLatestBlockhash', []);
-    const blockhashInfo = blockhashResult.value;
-    tx.recentBlockhash = blockhashInfo.blockhash;
-    (tx as any).lastValidBlockHeight = blockhashInfo.lastValidBlockHeight ?? undefined;
-    tx.partialSign(bettor);
-    const rawBase64 = tx.serialize().toString('base64');
-    const signature = await sendTransactionHttp(appConfig.SOLANA_RPC_URL, rawBase64);
-    await confirmSignatureHttp(appConfig.SOLANA_RPC_URL, signature, 'confirmed', 60000, 1000);
-    logger.info({ signature }, 'Bet transaction confirmed on base layer');
+    let signature: string;
+    const submitUrl: string | undefined = (payload as any).submitRpcUrl;
+    if (submitUrl) {
+      const erConn = new Connection(submitUrl, 'confirmed');
+      const { blockhash, lastValidBlockHeight } = await erConn.getLatestBlockhash();
+      tx.recentBlockhash = blockhash;
+      (tx as any).lastValidBlockHeight = lastValidBlockHeight;
+      tx.feePayer = bettor.publicKey;
+      signature = await sendAndConfirmTransaction(erConn, tx, [bettor], {
+        skipPreflight: true,
+        commitment: 'confirmed',
+      } as any);
+      logger.info({ signature }, 'Bet transaction confirmed on ER');
+    } else {
+      const { blockhash, lastValidBlockHeight } = await baseConnection.getLatestBlockhash();
+      tx.recentBlockhash = blockhash;
+      (tx as any).lastValidBlockHeight = lastValidBlockHeight;
+      tx.feePayer = bettor.publicKey;
+      signature = await sendAndConfirmTransaction(baseConnection, tx, [bettor], {
+        skipPreflight: true,
+        commitment: 'confirmed',
+      } as any);
+      logger.info({ signature }, 'Bet transaction confirmed on base layer');
+    }
 
     await betsService.confirmBet(
       String(user._id),
@@ -237,11 +240,11 @@ async function main() {
 
     logger.info({ roundId: roundIdStr }, 'Bet confirmed on base layer');
 
-    logger.info({ roundId: roundIdStr }, 'Locking round before reveal');
+    logger.info({ roundId: roundIdStr }, 'Locking round');
     const lockSignature = await roundsService.lockRound(roundIdStr);
-    logger.info({ roundId: roundIdStr, lockSignature }, 'Round locked and delegated');
+    logger.info({ roundId: roundIdStr, lockSignature }, 'Round locked');
 
-    logger.info({ roundId: roundIdStr }, 'Revealing outcome via ER');
+    logger.info({ roundId: roundIdStr }, 'Revealing outcome');
     await roundsService.revealOutcome(roundIdStr);
     logger.info({ roundId: roundIdStr }, 'Outcome revealed');
 
@@ -303,6 +306,30 @@ async function rpcRequest(endpoint: string, method: string, params: any[]): Prom
   return body?.result;
 }
 
+function getWritableAccounts(tx: Transaction, feePayer?: PublicKey): string[] {
+  const set = new Set<string>();
+  if (feePayer) set.add(feePayer.toBase58());
+  for (const ix of tx.instructions) {
+    for (const key of ix.keys) {
+      if (key.isWritable) set.add(key.pubkey.toBase58());
+    }
+  }
+  return Array.from(set);
+}
+
+async function routerGetBlockhashForAccounts(routerUrl: string, accounts: string[]): Promise<{ blockhash: string; lastValidBlockHeight?: number }> {
+  const res = await fetch(routerUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getBlockhashForAccounts', params: [accounts] }),
+  });
+  if (!res.ok) throw new Error(`Router HTTP ${res.status}`);
+  const body: any = await res.json();
+  if (body?.error) throw new Error(body.error?.message || 'Router error');
+  if (!body?.result?.blockhash) throw new Error('Router returned no blockhash');
+  return body.result;
+}
+
 async function sendTransactionHttp(endpoint: string, rawBase64: string): Promise<string> {
   return rpcRequest(endpoint, 'sendTransaction', [
     rawBase64,
@@ -339,34 +366,7 @@ async function confirmSignatureHttp(
   throw new Error(`Transaction ${signature} not confirmed within ${timeoutMs}ms`);
 }
 
-async function prepareTransactionWithRouter(tx: Transaction, feePayer: PublicKey): Promise<void> {
-  tx.feePayer = feePayer;
-  const message = tx.compileMessage();
-  const writableAccounts = getWritableAccountKeys(message);
-  const blockhashInfo = await rpcRequest(ROUTER_HTTP_URL, 'getBlockhashForAccounts', [writableAccounts]);
-  if (!blockhashInfo?.blockhash) {
-    throw new Error('Failed to fetch router blockhash');
-  }
-  tx.recentBlockhash = blockhashInfo.blockhash;
-  (tx as any).lastValidBlockHeight = blockhashInfo.lastValidBlockHeight ?? undefined;
-}
-
-function getWritableAccountKeys(message: Message): string[] {
-  const { accountKeys, header } = message;
-  const writable: string[] = [];
-  const numSignerWritable = header.numRequiredSignatures - header.numReadonlySignedAccounts;
-  const numNonSignerWritable = accountKeys.length - header.numRequiredSignatures - header.numReadonlyUnsignedAccounts;
-
-  accountKeys.forEach((key, index) => {
-    const isSigner = index < header.numRequiredSignatures;
-    const isWritable = isSigner
-      ? index < numSignerWritable
-      : index < header.numRequiredSignatures + numNonSignerWritable;
-    if (isWritable) writable.push(key.toBase58());
-  });
-
-  return writable;
-}
+//
 
 function loadOrCreateBettorKeypair(): { bettor: Keypair; keyPath: string; created: boolean } {
   const envPath = process.env.BETTOR_KEYPAIR_PATH?.trim();

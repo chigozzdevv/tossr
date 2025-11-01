@@ -14,6 +14,13 @@ import bs58 from 'bs58';
 import { DISCRIMINATORS } from '@/utils/anchor-discriminators';
 const tossrProgram = new TossrProgramService();
 
+function getRouterUrl(url: string): string {
+  if (/router\.magicblock\.app/.test(url)) return url;
+  if (/devnet\.magicblock\.app/.test(url)) return 'https://devnet-router.magicblock.app';
+  if (/mainnet\.magicblock\.app/.test(url)) return 'https://mainnet-router.magicblock.app';
+  return url;
+}
+
 export class BetsService {
   async createBetTransaction(
     userId: string,
@@ -65,6 +72,8 @@ export class BetsService {
       needsVaultAta = !info;
     } catch {}
 
+    const isDelegated = Boolean((round as any).delegateTxHash && !(round as any).undelegateTxHash);
+
     const { transaction, betPda } = await tossrProgram.placeBet(
       userPubkey,
       marketPubkey,
@@ -72,13 +81,14 @@ export class BetsService {
       selectionEncoded,
       stake,
       mint,
-      { useER: false }
+      { useER: isDelegated }
     );
 
     const serializedTransaction = transaction.serialize({ requireAllSignatures: false, verifySignatures: false });
 
     logger.info({ userId, roundId, stake, betPda: betPda.toString() }, 'Bet transaction created');
 
+    const bhSource = (transaction as any).__mb_blockhash_source as 'router' | 'er' | undefined;
     return {
       transaction: serializedTransaction.toString('base64'),
       betPda: betPda.toString(),
@@ -86,8 +96,8 @@ export class BetsService {
       vaultPda: vaultPda ? vaultPda.toString() : undefined,
       needsVaultAta,
       mint: mint.toString(),
-      submitRpcUrl: Boolean((round as any).delegateTxHash && !(round as any).undelegateTxHash)
-        ? config.EPHEMERAL_RPC_URL
+      submitRpcUrl: isDelegated
+        ? (bhSource === 'router' ? getRouterUrl(config.EPHEMERAL_RPC_URL) : config.EPHEMERAL_RPC_URL)
         : config.SOLANA_RPC_URL,
     } as any;
   }
@@ -125,6 +135,7 @@ export class BetsService {
     const erConn = new Connection(config.EPHEMERAL_RPC_URL, { commitment: 'confirmed' });
     const baseConn = new Connection(config.SOLANA_RPC_URL, { commitment: 'confirmed' });
     const betPdaPk = new PublicKey(betPda);
+    let detectedBetAccount: any = null;
 
     if (isDelegated) {
       try {
@@ -132,7 +143,15 @@ export class BetsService {
 
         await new Promise(r => setTimeout(r, 300));
 
-        let betAccountInfo = await erConn.getAccountInfo(betPdaPk, 'confirmed');
+        const routerEndpoint = getRouterUrl(config.EPHEMERAL_RPC_URL);
+        const routerConn = routerEndpoint.includes('magicblock.app')
+          ? new ConnectionMagicRouter(routerEndpoint, { commitment: 'confirmed', httpHeaders: { 'Content-Type': 'application/json' } } as any)
+          : new Connection(routerEndpoint, { commitment: 'confirmed' });
+
+        let betAccountInfo = await (routerConn as any).getAccountInfo(betPdaPk, 'confirmed').catch(() => null);
+        if (!betAccountInfo) {
+          betAccountInfo = await erConn.getAccountInfo(betPdaPk, 'confirmed');
+        }
 
         if (!betAccountInfo) {
           for (let i = 0; i < 8; i++) {
@@ -143,6 +162,7 @@ export class BetsService {
         }
 
         if (betAccountInfo) {
+          detectedBetAccount = betAccountInfo;
           logger.info({ txSignature, roundId, duration: '< 3s' }, 'ER bet confirmed (fast path)');
           return await this.processBetConfirmation(
             userId,
@@ -162,20 +182,8 @@ export class BetsService {
       }
     }
 
-    const routerEndpoint = config.EPHEMERAL_RPC_URL.includes('magicblock.app')
-      ? 'https://devnet-router.magicblock.app'
-      : config.EPHEMERAL_RPC_URL;
-    const routerConn =
-      routerEndpoint.includes('magicblock.app')
-        ? new ConnectionMagicRouter(routerEndpoint, {
-            commitment: 'confirmed',
-            httpHeaders: { 'Content-Type': 'application/json' },
-          } as any)
-        : new Connection(routerEndpoint, { commitment: 'confirmed' });
-
-    const connections = isDelegated
-      ? [erConn, routerConn, baseConn]
-      : [baseConn, erConn, routerConn];
+    const betAccountInfo = detectedBetAccount;
+    const txResult = null as any;
     const toNumber = (value: any) => {
       if (typeof value === 'number') return value;
       if (typeof value === 'bigint') return Number(value);
@@ -189,84 +197,17 @@ export class BetsService {
       return Number(value ?? 0);
     };
 
-    const tryGetTx = async () => {
-      for (const conn of connections) {
-        try {
-          const res = await conn.getTransaction(txSignature, {
-            maxSupportedTransactionVersion: 0,
-            commitment: 'confirmed',
-            searchTransactionHistory: true,
-          } as any);
-          if (res) return res;
-        } catch {}
-      }
-      return null;
-    };
-
-    const checkSignatureStatus = async () => {
-      for (const conn of connections) {
-        try {
-          const statuses = await conn.getSignatureStatuses([txSignature], {
-            searchTransactionHistory: true,
-          });
-          const status = statuses?.value?.[0];
-          if (status?.err) {
-            throw new ValidationError('Transaction failed on-chain');
-          }
-          if (status?.confirmationStatus) {
-            return true;
-          }
-        } catch (err) {
-          if (err instanceof ValidationError) throw err;
-        }
-      }
-      return false;
-    };
-
-    const fetchBetAccount = async () => {
-      for (const conn of connections) {
-        try {
-          const info = await conn.getAccountInfo(betPdaPk, 'confirmed');
-          if (info) return info;
-        } catch {}
-      }
-      return null;
-    };
-
-    let txResult = await tryGetTx();
-    let betAccountInfo = await fetchBetAccount();
-    const deadline = Date.now() + 90000;
-    let lastStatusCheck = 0;
-
-    while (!betAccountInfo && !txResult && Date.now() < deadline) {
-      const now = Date.now();
-
-      if (now - lastStatusCheck > 3000) {
-        const confirmed = await checkSignatureStatus();
-        lastStatusCheck = now;
-        if (confirmed) {
-          logger.info({ txSignature, roundId }, 'Transaction confirmed via status polling');
-          betAccountInfo = await fetchBetAccount();
-          if (betAccountInfo) break;
-        }
-      }
-
-      await new Promise((r) => setTimeout(r, 1500));
-      txResult = await tryGetTx();
-      if (!betAccountInfo) {
-        betAccountInfo = await fetchBetAccount();
-      }
-    }
-
-    if (!betAccountInfo && !txResult) {
-      const finalStatusCheck = await checkSignatureStatus();
-      if (!finalStatusCheck) {
-        throw new ValidationError('Transaction not found on-chain after 90 seconds');
-      }
-      betAccountInfo = await fetchBetAccount();
-    }
-
     if (txResult?.meta?.err) {
+      try {
+        logger.error(
+          {
+            signature: txSignature,
+            error: txResult.meta.err,
+            logs: txResult.meta.logMessages,
+          },
+          'Bet transaction failed with on-chain error'
+        );
+      } catch {}
       throw new ValidationError('Transaction failed on-chain');
     }
 

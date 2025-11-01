@@ -227,10 +227,11 @@ export function LiveRoundsSection() {
   const activeRounds = useMemo(() => {
     return rounds
       .map((round) => {
-        const openedAt = round.openedAt ? new Date(round.openedAt).getTime() : null
-        const endsAt = openedAt ? openedAt + ROUND_DURATION_MS : null
+        const baseAtStr = round.scheduledReleaseAt || round.openedAt
+        const baseAt = baseAtStr ? new Date(baseAtStr).getTime() : null
+        const endsAt = baseAt ? baseAt + ROUND_DURATION_MS : null
         const timeLeftSeconds = endsAt ? Math.max(0, Math.floor((endsAt - now) / 1000)) : null
-        return { round, openedAt, endsAt, timeLeftSeconds }
+        return { round, openedAt: baseAt, endsAt, timeLeftSeconds }
       })
       .sort((a, b) => (a.endsAt ?? Number.MAX_SAFE_INTEGER) - (b.endsAt ?? Number.MAX_SAFE_INTEGER))
   }, [rounds, now])
@@ -328,8 +329,8 @@ export function LiveRoundsSection() {
               const options = buildRoundOptions(round).slice(0, 3)
               const tagText = 'Live'
               const tagBackground = 'color-mix(in oklab, var(--accent) 32%, transparent)'
-              const openedTime = round.openedAt
-                ? new Date(round.openedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+              const openedTime = (round.scheduledReleaseAt || round.openedAt)
+                ? new Date(round.scheduledReleaseAt || round.openedAt as string).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
                 : null
 
               return (

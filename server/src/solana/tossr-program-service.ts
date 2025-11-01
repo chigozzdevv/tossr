@@ -66,8 +66,14 @@ export class TossrProgramService {
         }
       } as any);
     } catch {}
-    const idlPath = path.resolve(__dirname, '../../../contracts/anchor/target/idl/tossr_engine.json');
-    const idl = JSON.parse(fs.readFileSync(idlPath, 'utf8')) as Idl;
+    let idl: Idl;
+    const primaryIdlPath = path.resolve(__dirname, '../../../contracts/anchor/target/idl/tossr_engine.json');
+    try {
+      idl = JSON.parse(fs.readFileSync(primaryIdlPath, 'utf8')) as Idl;
+    } catch {
+      const fallbackIdlPath = path.resolve(__dirname, '../idl/tossr_engine.json');
+      idl = JSON.parse(fs.readFileSync(fallbackIdlPath, 'utf8')) as Idl;
+    }
     this.coder = new BorshCoder(idl as any);
 
     const configuredQueue = new PublicKey(config.VRF_ORACLE_QUEUE);
@@ -281,11 +287,28 @@ export class TossrProgramService {
   private async getErBlockhashForTransaction(
     tx: Transaction
   ): Promise<{ blockhash: string; lastValidBlockHeight?: number }> {
+    if (this.routerConnection) {
+      try {
+        const routerBlockhash = await this.routerConnection.getLatestBlockhashForTransaction(tx);
+        if (routerBlockhash?.blockhash) {
+          (tx as any).__mb_blockhash_source = 'router';
+          return routerBlockhash;
+        }
+      } catch (routerErr: any) {
+        logger.warn(
+          { error: routerErr instanceof Error ? routerErr.message : String(routerErr) },
+          'Magic Router blockhash fetch failed; falling back to ER RPC'
+        );
+      }
+    }
+
     const maxAttempts = 5;
     let lastError: unknown;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
-        return await this.erConnection.getLatestBlockhash();
+        const res = await this.erConnection.getLatestBlockhash();
+        (tx as any).__mb_blockhash_source = 'er';
+        return res;
       } catch (err: any) {
         lastError = err;
         const msg = String(err?.message || '');
@@ -294,21 +317,6 @@ export class TossrProgramService {
           continue;
         }
         throw err;
-      }
-    }
-
-    if (this.routerConnection) {
-      try {
-        const routerBlockhash = await this.routerConnection.getLatestBlockhashForTransaction(tx);
-        if (routerBlockhash?.blockhash) {
-          return routerBlockhash;
-        }
-      } catch (routerErr: any) {
-        lastError = routerErr;
-        logger.warn(
-          { error: routerErr instanceof Error ? routerErr.message : String(routerErr) },
-          'Magic Router blockhash fallback failed'
-        );
       }
     }
 
@@ -499,22 +507,17 @@ export class TossrProgramService {
       logger.info({ signature: sig, roundPda: roundPda.toString() }, 'Round locked on-chain');
       return sig;
     }
-
-    const tx = new Transaction().add(ix);
     try {
+      const sig = await this.sendViaRouter(new Transaction().add(ix), [adminKeypair], 'confirmed');
+      logger.info({ signature: sig, roundPda: roundPda.toString() }, 'Round locked via router');
+      return sig;
+    } catch (e: any) {
+      const tx = new Transaction().add(ix);
       const { blockhash } = await this.erConnection.getLatestBlockhash();
       tx.recentBlockhash = blockhash;
       tx.feePayer = adminKeypair.publicKey;
       const sig = await this.sendAndConfirm(this.erConnection, tx, [adminKeypair], 'confirmed', true);
       logger.info({ signature: sig, roundPda: roundPda.toString() }, 'Round locked on ER');
-      return sig;
-    } catch (e: any) {
-      const msg = String(e?.message || '');
-      if (!this.routerConnection || !(/Blockhash not found|fetch failed|UND_ERR_CONNECT_TIMEOUT|403|cannot be written|account subscription|channel closed/i.test(msg))) {
-        throw e;
-      }
-      const sig = await this.sendViaRouter(new Transaction().add(ix), [adminKeypair], 'confirmed');
-      logger.info({ signature: sig, roundPda: roundPda.toString() }, 'Round locked via router');
       return sig;
     }
   }
@@ -601,61 +604,30 @@ export class TossrProgramService {
       tx.feePayer = adminKeypair.publicKey;
       return this.sendAndConfirm(conn, tx, [adminKeypair], commitment, skipPreflight);
     }
-
-    let lastError: unknown;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        const tx = new Transaction().add(instruction);
-        const { blockhash } = await conn.getLatestBlockhash();
-        tx.recentBlockhash = blockhash;
-        tx.feePayer = adminKeypair.publicKey;
-        return await this.sendAndConfirm(conn, tx, [adminKeypair], commitment, skipPreflight);
-      } catch (error: any) {
-        lastError = error;
-        const message = String(error?.message || '');
-        if (!/Blockhash not found|fetch failed|UND_ERR_CONNECT_TIMEOUT|403|channel closed|PubsubClientError|Remote account provider error/i.test(message)) {
-          throw error;
-        }
-        if (attempt < 2) {
-          await this.sleep(400 * (attempt + 1));
-          continue;
-        }
-      }
-    }
-
-    const errMessage = lastError instanceof Error ? lastError.message : String(lastError ?? 'unknown error');
-    if (!this.routerConnection) {
-      throw lastError instanceof Error ? lastError : new Error(errMessage);
-    }
-
-    logger.warn({ roundNumber, error: errMessage }, 'ER commit failed; falling back to Magic Router');
-
-    let fallbackError: unknown;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        return await this.sendViaRouter(new Transaction().add(instruction), [adminKeypair], 'confirmed');
-      } catch (routerErr) {
-        fallbackError = routerErr;
-        const message = String((routerErr as any)?.message || '');
-        if (!/Blockhash not found|fetch failed|UND_ERR_CONNECT_TIMEOUT|403|channel closed|PubsubClientError|Remote account provider error/i.test(message)) {
-          throw routerErr;
-        }
-        if (attempt < 2) {
-          await this.sleep(500 * (attempt + 1));
-          continue;
-        }
-      }
-    }
-
-    logger.warn({ roundNumber }, 'Router commit failed; attempting base-layer commit as last resort');
     try {
-      const tx = new Transaction().add(instruction);
-      const { blockhash } = await this.connection.getLatestBlockhash();
-      tx.recentBlockhash = blockhash;
-      tx.feePayer = adminKeypair.publicKey;
-      return await this.sendAndConfirm(this.connection, tx, [adminKeypair], 'finalized', false);
-    } catch (finalErr) {
-      throw finalErr instanceof Error ? finalErr : fallbackError instanceof Error ? fallbackError : lastError;
+      return await this.sendViaRouter(new Transaction().add(instruction), [adminKeypair], 'confirmed');
+    } catch (routerErr) {
+      let lastError: unknown;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const tx = new Transaction().add(instruction);
+          const { blockhash } = await conn.getLatestBlockhash();
+          tx.recentBlockhash = blockhash;
+          tx.feePayer = adminKeypair.publicKey;
+          return await this.sendAndConfirm(conn, tx, [adminKeypair], commitment, skipPreflight);
+        } catch (error: any) {
+          lastError = error;
+          const message = String(error?.message || '');
+          if (!/Blockhash not found|fetch failed|UND_ERR_CONNECT_TIMEOUT|403|channel closed|PubsubClientError|Remote account provider error/i.test(message)) {
+            throw error;
+          }
+          if (attempt < 2) {
+            await this.sleep(400 * (attempt + 1));
+            continue;
+          }
+        }
+      }
+      throw lastError as any;
     }
   }
 
@@ -1085,7 +1057,7 @@ export class TossrProgramService {
         { pubkey: payer.publicKey, isSigner: true, isWritable: true },
         { pubkey: marketId, isSigner: false, isWritable: false },
         { pubkey: roundPda, isSigner: false, isWritable: true },
-        { pubkey: oracleQueue, isSigner: false, isWritable: true },
+        { pubkey: oracleQueue, isSigner: false, isWritable: false },
         { pubkey: PROGRAM_IDENTITY_PDA, isSigner: false, isWritable: false },
         { pubkey: VRF_PROGRAM_PK, isSigner: false, isWritable: false },
         { pubkey: SYSVAR_SLOT_HASHES_PUBKEY, isSigner: false, isWritable: false },
@@ -1138,35 +1110,32 @@ export class TossrProgramService {
       { pubkey: MAGIC_CONTEXT_PK, isSigner: false, isWritable: true },
     ];
     const ix = new TransactionInstruction({ keys, programId: TOSSR_PROGRAM_ID, data: DISCRIMINATORS.COMMIT_ROUND });
-    const tx = new Transaction().add(ix);
-
-    try {
-      const { blockhash } = await this.erConnection.getLatestBlockhash();
-      tx.recentBlockhash = blockhash;
-      tx.feePayer = payer.publicKey;
-      const erTxHash = await this.sendAndConfirm(
-        this.erConnection,
-        tx,
-        [payer],
-        'confirmed',
-        true
-      );
-
-      logger.info({ erTxHash, roundPda: roundPda.toString() }, 'Commit sent on ER');
-
-      const baseTxHash = await GetCommitmentSignature(erTxHash, this.erConnection);
-
-      logger.info({ baseTxHash, roundPda: roundPda.toString() }, 'Commit confirmed on base layer');
-
-      return { erTxHash, baseTxHash };
-    } catch (e: any) {
-      const msg = String(e?.message || '');
-      if (!this.routerConnection || !(/Blockhash not found|fetch failed|UND_ERR_CONNECT_TIMEOUT|403|channel closed|PubsubClientError/i.test(msg))) {
-        throw e;
-      }
-      const sig = await this.sendViaRouter(new Transaction().add(ix), [payer], 'confirmed');
-      return { erTxHash: sig, baseTxHash: sig };
+    if (this.routerConnection) {
+      try {
+        const sig = await this.sendViaRouter(new Transaction().add(ix), [payer], 'confirmed');
+        return { erTxHash: sig, baseTxHash: sig };
+      } catch {}
     }
+
+    const tx = new Transaction().add(ix);
+    const { blockhash } = await this.erConnection.getLatestBlockhash();
+    tx.recentBlockhash = blockhash;
+    tx.feePayer = payer.publicKey;
+    const erTxHash = await this.sendAndConfirm(
+      this.erConnection,
+      tx,
+      [payer],
+      'confirmed',
+      true
+    );
+
+    logger.info({ erTxHash, roundPda: roundPda.toString() }, 'Commit sent on ER');
+
+    const baseTxHash = await GetCommitmentSignature(erTxHash, this.erConnection);
+
+    logger.info({ baseTxHash, roundPda: roundPda.toString() }, 'Commit confirmed on base layer');
+
+    return { erTxHash, baseTxHash };
   }
 
   async commitAndUndelegateRoundER(
@@ -1189,46 +1158,38 @@ export class TossrProgramService {
     ];
     const ix = new TransactionInstruction({ keys, programId: TOSSR_PROGRAM_ID, data: DISCRIMINATORS.COMMIT_AND_UNDELEGATE_ROUND });
 
-    try {
-      const tx = new Transaction().add(ix);
-      const { blockhash } = await this.erConnection.getLatestBlockhash();
-      tx.recentBlockhash = blockhash;
-      tx.feePayer = payer.publicKey;
-      const erTxHash = await this.sendAndConfirm(
-        this.erConnection,
-        tx,
-        [payer],
-        'confirmed',
-        true
-      );
-
-      logger.info({ erTxHash, roundPda: roundPda.toString() }, 'Commit and undelegate sent on ER');
-
-      const baseTxHash = await GetCommitmentSignature(erTxHash, this.erConnection);
-
-      logger.info({ baseTxHash, roundPda: roundPda.toString() }, 'Undelegate confirmed on base layer');
-
-      return { erTxHash, baseTxHash };
-    } catch (e: any) {
-      const msg = String(e?.message || '');
-      if (!this.routerConnection || !(/Blockhash not found|fetch failed|UND_ERR_CONNECT_TIMEOUT|403|cannot be written/i.test(msg))) {
-        throw e;
-      }
-      logger.warn({ roundNumber, error: msg }, 'ER tx failed; falling back to Magic Router');
-    }
-
-    if (!this.routerConnection) throw new Error('Magic Router unavailable');
-    let lastErr: unknown;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        const sig = await this.sendViaRouter(new Transaction().add(ix), [payer], 'confirmed');
-        return { erTxHash: sig, baseTxHash: sig };
-      } catch (err) {
-        lastErr = err;
-        await this.sleep(400 * (attempt + 1));
+    if (this.routerConnection) {
+      let lastErr: unknown;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const sig = await this.sendViaRouter(new Transaction().add(ix), [payer], 'confirmed');
+          return { erTxHash: sig, baseTxHash: sig };
+        } catch (err) {
+          lastErr = err;
+          await this.sleep(400 * (attempt + 1));
+        }
       }
     }
-    throw lastErr;
+
+    const tx = new Transaction().add(ix);
+    const { blockhash } = await this.erConnection.getLatestBlockhash();
+    tx.recentBlockhash = blockhash;
+    tx.feePayer = payer.publicKey;
+    const erTxHash = await this.sendAndConfirm(
+      this.erConnection,
+      tx,
+      [payer],
+      'confirmed',
+      true
+    );
+
+    logger.info({ erTxHash, roundPda: roundPda.toString() }, 'Commit and undelegate sent on ER');
+
+    const baseTxHash = await GetCommitmentSignature(erTxHash, this.erConnection);
+
+    logger.info({ baseTxHash, roundPda: roundPda.toString() }, 'Undelegate confirmed on base layer');
+
+    return { erTxHash, baseTxHash };
   }
 
   async revealEntropyOutcome(
@@ -1521,9 +1482,10 @@ export class TossrProgramService {
     if (!this.routerConnection) {
       throw new Error('Magic Router unavailable');
     }
-    const { blockhash } = await this.routerConnection.getLatestBlockhash();
+    const { blockhash, lastValidBlockHeight } = await (this.routerConnection as any).getLatestBlockhashForTransaction(tx);
     const [firstSigner] = signers;
     tx.recentBlockhash = blockhash;
+    (tx as any).lastValidBlockHeight = lastValidBlockHeight;
     if (!tx.feePayer) {
       if (!firstSigner) {
         throw new Error('No signers available to set fee payer');
@@ -1569,41 +1531,27 @@ export class TossrProgramService {
       data,
     });
 
-    try {
-      const transaction = new Transaction().add(instruction);
-      const { blockhash } = await this.erConnection.getLatestBlockhash();
-      transaction.recentBlockhash = blockhash;
-      transaction.feePayer = payer.publicKey;
-      const sig = await this.sendAndConfirm(
-        this.erConnection,
-        transaction,
-        [payer],
-        'confirmed',
-        true
-      );
-      logger.info({ signature: sig, roundPda: roundPda.toString() }, 'Round state committed');
-      return sig;
-    } catch (e: any) {
-      const msg = String(e?.message || '');
-      if (!this.routerConnection || !(/Blockhash not found|fetch failed|UND_ERR_CONNECT_TIMEOUT|403|cannot be written/i.test(msg))) {
-        throw e;
-      }
-      logger.warn({ roundNumber, error: msg }, 'ER tx failed; falling back to Magic Router');
-    }
-
-    if (!this.routerConnection) throw new Error('Magic Router unavailable');
-    let lastErr: unknown;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    if (this.routerConnection) {
       try {
         const sig = await this.sendViaRouter(new Transaction().add(instruction), [payer], 'confirmed');
         logger.info({ signature: sig, roundPda: roundPda.toString() }, 'Round state committed via router');
         return sig;
-      } catch (err) {
-        lastErr = err;
-        await this.sleep(400 * (attempt + 1));
-      }
+      } catch {}
     }
-    throw lastErr;
+
+    const transaction = new Transaction().add(instruction);
+    const { blockhash } = await this.erConnection.getLatestBlockhash();
+    transaction.recentBlockhash = blockhash;
+    transaction.feePayer = payer.publicKey;
+    const sig = await this.sendAndConfirm(
+      this.erConnection,
+      transaction,
+      [payer],
+      'confirmed',
+      true
+    );
+    logger.info({ signature: sig, roundPda: roundPda.toString() }, 'Round state committed');
+    return sig;
   }
 
   async commitAndUndelegateRound(

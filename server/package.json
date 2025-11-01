@@ -20,7 +20,11 @@
     "rounds:timing": "tsx src/scripts/check-round-timing.ts",
     "rounds:cleanup-stuck": "tsx src/scripts/cleanup-stuck-rounds.ts",
     "rounds:clear-all": "tsx src/scripts/clear-all-rounds.ts",
-    "markets:list": "tsx src/scripts/list-markets.ts"
+    "vrf:request": "tsx src/scripts/request-vrf.ts",
+    "markets:list": "tsx src/scripts/list-markets.ts",
+    "er:check": "tsx src/scripts/check-er-readiness.ts",
+    "demo:bootstrap": "tsx src/scripts/bootstrap-er-demo.ts",
+    "tee:attest": "tsx src/scripts/test-tee-attestation.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.31.1",

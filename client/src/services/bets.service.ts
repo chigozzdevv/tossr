@@ -59,7 +59,8 @@ export const betsService = {
   async createTransaction(params: { roundId: string; selection: any; stake: number }) {
     const response = await api.post<ApiSuccess<BetTxResponse>>(
       '/bets/place',
-      params
+      params,
+      { timeoutMs: 120000 } as any
     )
     return response.data
   },

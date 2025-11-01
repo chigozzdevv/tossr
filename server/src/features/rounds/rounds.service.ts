@@ -20,8 +20,6 @@ import {
 const tossrProgram = new TossrProgramService();
 const teeService = new TeeService();
 
-const ER_VALIDATOR = new PublicKey(config.ER_VALIDATOR_PUBKEY);
-
 export class RoundsService {
   async queueRound(marketId: string, scheduledReleaseAt: Date, releaseGroupId: string) {
     const market = await Market.findById(marketId).lean();
@@ -210,7 +208,13 @@ export class RoundsService {
 
     await new Promise(r => setTimeout(r, 2000));
     const r = await Round.findOne({ marketId, roundNumber }, { _id: 1 }).lean();
-    logger.info({ roundId: String(r?._id), roundNumber, signature }, 'Round opened (delegation skipped for demo)');
+    logger.info({ roundId: String(r?._id), roundNumber, signature }, 'Round opened');
+
+    try {
+      await this.delegateRoundToER(String(r?._id), marketPubkey);
+    } catch (e) {
+      logger.error({ roundId: String(r?._id), err: e }, 'Delegation failed');
+    }
 
     const final = await Round.findOne({ marketId, roundNumber }).lean();
     if (!final) return null as any;
@@ -287,14 +291,33 @@ export class RoundsService {
 
           logger.info({ sig, vaultTokenAccount: vaultTokenAccount.toString() }, 'Vault token account created');
         }
+
+        const erConnection = new Connection(config.EPHEMERAL_RPC_URL);
+        const erVaultAtaInfo = await erConnection.getAccountInfo(vaultTokenAccount);
+        if (!erVaultAtaInfo) {
+          const createErAtaIx = createAssociatedTokenAccountInstruction(
+            adminKeypair.publicKey,
+            vaultTokenAccount,
+            vaultPda,
+            mint,
+            TOKEN_PROGRAM_ID,
+            ASSOCIATED_TOKEN_PROGRAM_ID,
+          );
+          const erTx = new Transaction().add(createErAtaIx);
+          const { blockhash } = await erConnection.getLatestBlockhash();
+          erTx.recentBlockhash = blockhash;
+          erTx.feePayer = adminKeypair.publicKey;
+          const erSig = await erConnection.sendTransaction(erTx, [adminKeypair], { skipPreflight: false });
+          await erConnection.confirmTransaction(erSig, 'confirmed');
+          logger.info({ sig: erSig, vaultTokenAccount: vaultTokenAccount.toString() }, 'Vault token account created on ER');
+        }
       }
     }
 
     const delegateTxHash = await tossrProgram.delegateRound(
       marketPubkey,
       round.roundNumber,
-      adminKeypair,
-      ER_VALIDATOR
+      adminKeypair
     );
 
     await Round.updateOne({ _id: roundId }, { $set: { delegateTxHash } });
@@ -309,8 +332,26 @@ export class RoundsService {
       throw new NotFoundError('Round');
     }
 
-    if (round.status === RoundStatus.LOCKED || round.status === RoundStatus.SETTLED) {
-      logger.info({ roundId, status: round.status }, 'Round already locked or settled, skipping');
+    if (round.status === RoundStatus.SETTLED) {
+      logger.info({ roundId, status: round.status }, 'Round already settled, skipping');
+      return round.lockTxHash || 'already-settled';
+    }
+    if (round.status === RoundStatus.LOCKED) {
+      logger.info({ roundId, status: round.status }, 'Round already locked; continuing pipeline if needed');
+
+      const betCount = await Bet.countDocuments({ roundId });
+      if (betCount === 0) {
+        await Round.updateOne({ _id: roundId }, { $set: { status: RoundStatus.FAILED, settledAt: new Date() } });
+        logger.info({ roundId }, 'Round expired (no bets)');
+        return round.lockTxHash || 'already-locked';
+      }
+
+      if (!(round as any).attestation) {
+        await this.prepareOutcome(roundId);
+      }
+
+      await this.commitPreparedOutcome(roundId);
+
       return round.lockTxHash || 'already-locked';
     }
 
@@ -336,18 +377,6 @@ export class RoundsService {
       const msg = String(e?.message || '');
       if (msg.includes('6002') || msg.includes('InvalidState')) {
         lockTxHash = 'already-locked';
-      } else if (
-        msg.includes('3007') ||
-        msg.includes('AccountOwnedByWrongProgram') ||
-        msg.includes('loads a writable account that cannot be written')
-      ) {
-        await tossrProgram.ensureRoundUndelegated(marketPubkey, round.roundNumber, adminKeypair);
-        lockTxHash = await tossrProgram.lockRound(
-          marketPubkey,
-          round.roundNumber,
-          adminKeypair,
-          { useER: false }
-        );
       } else {
         throw e;
       }
@@ -367,48 +396,8 @@ export class RoundsService {
     await this.prepareOutcome(roundId);
 
     const refreshedRound = await Round.findById(roundId).lean();
-    const attestationPayload = refreshedRound?.attestation
-      ? typeof refreshedRound.attestation === 'string'
-        ? JSON.parse(refreshedRound.attestation as any)
-        : (refreshedRound.attestation as any)
-      : null;
-    const useERPath = !attestationPayload?.local_fallback;
-
-    if (useERPath) {
-      try {
-        await this.delegateRoundToER(roundId, marketPubkey);
-        logger.info({ roundId }, 'Round delegated after lock');
-      } catch (error) {
-        logger.error({ roundId, error }, 'Failed to delegate after lock');
-      }
-    } else {
-      logger.info({ roundId }, 'Skipping delegation (local TEE fallback active)');
-    }
 
     await this.commitPreparedOutcome(roundId);
-
-    const mref = (round as any).marketId;
-    const marketId = typeof mref === 'object' && mref !== null ? String(mref._id ?? mref) : String(mref);
-    const maxRetries = 3;
-    let roundOpened = false;
-
-    for (let attempt = 0; attempt < maxRetries && !roundOpened; attempt++) {
-      try {
-        if (attempt > 0) {
-          await new Promise(r => setTimeout(r, 1000 * attempt));
-        }
-
-        await this.openRound(marketId);
-        roundOpened = true;
-        logger.info({ roundId, marketId, attempt }, 'Opened next round after lock');
-      } catch (e) {
-        logger.error({ roundId, marketId, err: e, attempt, maxRetries }, `Failed to open next round after lock (attempt ${attempt + 1}/${maxRetries})`);
-
-        if (attempt === maxRetries - 1) {
-          logger.error({ roundId, marketId }, 'All retry attempts exhausted, auto-open scheduler will handle');
-        }
-      }
-    }
 
     return lockTxHash;
   }
@@ -425,6 +414,7 @@ export class RoundsService {
     const marketPubkey = new PublicKey(marketConfig.solanaAddress);
 
     const oracleQueue = new PublicKey(config.VRF_ORACLE_QUEUE);
+    const isDelegated = Boolean((round as any).delegateTxHash && !(round as any).undelegateTxHash);
     const clientSeed = round.roundNumber % 256;
 
     try {
@@ -434,7 +424,7 @@ export class RoundsService {
         clientSeed,
         adminKeypair,
         oracleQueue,
-        { useER: false }
+        { useER: isDelegated }
       );
       logger.info({ roundId, roundNumber: round.roundNumber }, 'VRF randomness requested');
     } catch (error: any) {
@@ -506,48 +496,64 @@ export class RoundsService {
     const attestationSig = Buffer.from(attestation.signature, 'hex');
 
     const isDelegated = Boolean((round as any).delegateTxHash && !(round as any).undelegateTxHash);
-    const commitTxHash = await tossrProgram.commitOutcomeHash(
-      marketPubkey,
-      round.roundNumber,
-      commitmentHash,
-      attestationSig,
-      adminKeypair,
-      { useER: isDelegated }
-    );
+    if (isDelegated) {
+      await Round.updateOne({ _id: roundId }, { $set: { commitTxHash: 'er-skip' } });
+      await roundLifecycleQueue.add('reveal-outcome', { roundId }, { jobId: `reveal-${roundId}`, delay: config.LOCK_DURATION_SECONDS * 1000 });
+      return;
+    }
 
-    await Round.updateOne({ _id: roundId }, { $set: { commitTxHash } });
+    let commitTxHash: string | null = null;
+    try {
+      commitTxHash = await tossrProgram.commitOutcomeHash(
+        marketPubkey,
+        round.roundNumber,
+        commitmentHash,
+        attestationSig,
+        adminKeypair,
+        { useER: false }
+      );
+      await Round.updateOne({ _id: roundId }, { $set: { commitTxHash } });
+      logger.info({ roundId, commitTxHash }, 'Outcome hash committed (hidden until reveal)');
 
-    logger.info({ roundId, commitTxHash }, 'Outcome hash committed (hidden until reveal)');
+      const roundPda = await tossrProgram.getRoundPda(marketPubkey, round.roundNumber);
+      const baseConnection = new Connection(config.SOLANA_RPC_URL);
+      const erConnection = new Connection(config.EPHEMERAL_RPC_URL);
 
-    const roundPda = await tossrProgram.getRoundPda(marketPubkey, round.roundNumber);
-    const baseConnection = new Connection(config.SOLANA_RPC_URL);
-    const erConnection = new Connection(config.EPHEMERAL_RPC_URL);
-
-    const maxAttempts = 12;
-    let state: Awaited<ReturnType<typeof fetchRoundStateRaw>> | null = null;
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      const [erState, baseState] = await Promise.all([
-        fetchRoundStateRaw(erConnection, roundPda),
-        fetchRoundStateRaw(baseConnection, roundPda),
-      ]);
-      state = erState?.commitmentHash ? erState : baseState;
-      if (state && state.commitmentHash) {
-        break;
+      const maxAttempts = 12;
+      let state: Awaited<ReturnType<typeof fetchRoundStateRaw>> | null = null;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        const [erState, baseState] = await Promise.all([
+          fetchRoundStateRaw(erConnection, roundPda),
+          fetchRoundStateRaw(baseConnection, roundPda),
+        ]);
+        state = erState?.commitmentHash ? erState : baseState;
+        if (state && state.commitmentHash) break;
+        await new Promise((resolve) => setTimeout(resolve, 500 * Math.max(1, attempt + 1)));
       }
-      await new Promise((resolve) => setTimeout(resolve, 500 * Math.max(1, attempt + 1)));
-    }
 
-    if (!state || !state.commitmentHash) {
-      logger.warn({ roundId, roundPda: roundPda.toBase58() }, 'Commit verification pending; state not yet available');
-    } else if (state.commitmentHash.toLowerCase() !== attestation.commitment_hash.toLowerCase()) {
-      throw new Error(`Commit verification failed: mismatch (expected ${attestation.commitment_hash}, on-chain ${state.commitmentHash})`);
-    } else {
-      logger.info({ roundId }, 'Commit verification passed');
-    }
+      if (!state || !state.commitmentHash) {
+        logger.warn({ roundId, roundPda: roundPda.toBase58() }, 'Commit verification pending; state not yet available');
+      } else if (state.commitmentHash.toLowerCase() !== attestation.commitment_hash.toLowerCase()) {
+        throw new Error(`Commit verification failed: mismatch (expected ${attestation.commitment_hash}, on-chain ${state.commitmentHash})`);
+      } else {
+        logger.info({ roundId }, 'Commit verification passed');
+      }
 
-    await roundLifecycleQueue.add('reveal-outcome', { roundId }, {
-      delay: config.LOCK_DURATION_SECONDS * 1000,
-    });
+      await roundLifecycleQueue.add('reveal-outcome', { roundId }, { jobId: `reveal-${roundId}`, delay: config.LOCK_DURATION_SECONDS * 1000 });
+    } catch (e: any) {
+      const msg = String(e?.message || '');
+      if (/InvalidAttestation|6016/i.test(msg)) {
+        try {
+          await this.delegateRoundToER(roundId, marketPubkey);
+          await Round.updateOne({ _id: roundId }, { $set: { commitTxHash: 'er-skip' } });
+          await roundLifecycleQueue.add('reveal-outcome', { roundId }, { delay: config.LOCK_DURATION_SECONDS * 1000 });
+          return;
+        } catch (err) {
+          throw e;
+        }
+      }
+      throw e;
+    }
   }
 
   async revealOutcome(roundId: string) {
@@ -679,7 +685,7 @@ export class RoundsService {
       throw e;
     }
 
-    await betSettlementQueue.add('settle-bets', { roundId });
+    await betSettlementQueue.add('settle-bets', { roundId }, { jobId: `settle-${roundId}` });
     await this.commitRoundStateToBase(roundId);
   }
 

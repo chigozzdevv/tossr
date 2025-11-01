@@ -64,12 +64,19 @@ export function HistoryPage() {
                   <div className="dashboard-empty">No {STATUS_LABELS[key].toLowerCase()} yet.</div>
                 ) : (
                   <ul className="dashboard-history-list">
-                    {bets.map((bet) => (
+                    {bets.map((bet) => {
+                      const roundDoc: any = (bet as any).round ?? (bet as any).roundId ?? null;
+                      const roundIdStr = typeof (bet as any).roundId === 'string'
+                        ? (bet as any).roundId
+                        : (roundDoc?._id ? String(roundDoc._id) : (roundDoc?.id ?? '—'));
+                      const marketName = roundDoc?.market?.name ?? roundDoc?.marketId?.name ?? bet.marketId;
+                      return (
                       <li key={bet.id}>
                         <div className="dashboard-history-row">
                           <div>
-                            <strong>{bet.round?.market.name ?? bet.marketId}</strong>
-                            <span>Round #{bet.round?.roundNumber ?? '—'}</span>
+                            <strong>{marketName}</strong>
+                            <span>Round #{roundDoc?.roundNumber ?? '—'}</span>
+                            <div><small className="dashboard-round-stat-label">ID:</small> <code className="dashboard-code">{roundIdStr}</code></div>
                           </div>
                           <div className="dashboard-history-meta">
                             <span>{(bet.stake ?? 0) / 1_000_000_000} SOL</span>
@@ -77,7 +84,7 @@ export function HistoryPage() {
                           </div>
                         </div>
                       </li>
-                    ))}
+                    )})}
                   </ul>
                 )}
               </div>

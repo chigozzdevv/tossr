@@ -77,6 +77,8 @@ export function RoundDetailPage() {
   const [status, setStatus] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [showAllOptions, setShowAllOptions] = useState(false)
+  const [showConfirmModal, setShowConfirmModal] = useState(false)
+  const [confirmedSig, setConfirmedSig] = useState<string>('')
   type ProbabilitySnapshot = { timestamp: string; probabilities: { selection: any; probability: number; bets: number }[] }
   type ApiSuccess<T> = { success: boolean; data: T }
   const [probabilityHistory, setProbabilityHistory] = useState<ProbabilitySnapshot[]>([])
@@ -141,9 +143,11 @@ export function RoundDetailPage() {
   const ROUND_DURATION_MS = ROUND_DURATION_SECONDS * 1000
 
   const endsAt = useMemo(() => {
-    if (!round?.openedAt) return new Date()
-    const opened = new Date(round.openedAt).getTime()
-    return new Date(opened + ROUND_DURATION_MS)
+    if (!round) return new Date()
+    const base = round.scheduledReleaseAt || round.openedAt
+    if (!base) return new Date()
+    const start = new Date(base).getTime()
+    return new Date(start + ROUND_DURATION_MS)
   }, [round, ROUND_DURATION_MS])
 
   const probabilityData = useMemo(() => {
@@ -261,47 +265,24 @@ export function RoundDetailPage() {
 
       const isRoundDelegated = round.delegateTxHash && !round.undelegateTxHash
       const submitRpcUrl = (transactionPayload as any)?.submitRpcUrl as string | undefined
+
       const sendConn = submitRpcUrl
         ? new Connection(submitRpcUrl, { commitment: 'confirmed' })
         : (isRoundDelegated ? new Connection(config.EPHEMERAL_RPC_URL, { commitment: 'confirmed' }) : connection)
-
-      try {
-        const baseBalance = await connection.getBalance(wallet.publicKey!)
-        console.log('Wallet balance (base devnet):', baseBalance / 1_000_000_000, 'SOL')
-      } catch {}
-
-      console.log('Sending transaction to:', submitRpcUrl || (isRoundDelegated ? 'Magic Router/ER' : 'Solana Base'))
-
       try {
         const tx = Transaction.from(txBytes)
-        sig = await wallet.sendTransaction(tx, sendConn, {
-          skipPreflight: true,
-          preflightCommitment: 'confirmed'
-        })
+        try {
+          const { blockhash, lastValidBlockHeight } = await sendConn.getLatestBlockhash()
+          tx.recentBlockhash = blockhash
+          ;(tx as any).lastValidBlockHeight = lastValidBlockHeight
+          tx.feePayer = wallet.publicKey!
+        } catch {}
+        sig = await wallet.sendTransaction(tx, sendConn, { skipPreflight: true, preflightCommitment: 'confirmed' })
       } catch {
         const vtx = VersionedTransaction.deserialize(txBytes)
-        sig = await wallet.sendTransaction(vtx, sendConn, {
-          skipPreflight: true,
-          preflightCommitment: 'confirmed'
-        })
+        sig = await wallet.sendTransaction(vtx, sendConn, { skipPreflight: true, preflightCommitment: 'confirmed' })
       }
-
-      console.log('Transaction sent:', sig)
-
-      try {
-        const confirmRpcUrl = submitRpcUrl || (isRoundDelegated ? config.EPHEMERAL_RPC_URL : undefined)
-        const confirmConn = confirmRpcUrl
-          ? new Connection(confirmRpcUrl, { commitment: 'confirmed' })
-          : connection;
-        const confirmation = await confirmConn.confirmTransaction(sig, 'confirmed');
-        if (confirmation?.value?.err) {
-          throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
-        }
-      } catch (confirmErr: any) {
-        console.error('Transaction confirmation failed:', confirmErr);
-        setStatus(confirmErr?.message || 'Transaction confirmation failed, verifying via backend...');
-      }
-
+      
       confirmingRef.current = true
       lastConfirmedSigRef.current = sig
 
@@ -312,7 +293,9 @@ export function RoundDetailPage() {
         txSignature: sig,
         betPda: transactionPayload.betPda,
       })
-      setStatus(`Bet confirmed: ${sig}`)
+      setConfirmedSig(sig)
+      setShowConfirmModal(true)
+      setStatus('')
     } catch (err: any) {
       console.error('Bet placement error:', err)
       console.error('Error details:', {
@@ -648,6 +631,60 @@ export function RoundDetailPage() {
           </div>
         )}
       </aside>
+
+      {showConfirmModal && (
+        <div style={{ position: 'fixed', inset: 0, background: 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ width: 'min(720px, 95vw)', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 14, padding: '1.5rem', boxShadow: '0 18px 48px rgba(0,0,0,0.45)' }}>
+            <h3 className="dashboard-title" style={{ marginBottom: '0.25rem' }}>Bet Confirmed</h3>
+            <p className="dashboard-subtitle">Your bet was submitted successfully. You’ll see the result after the round settles.</p>
+
+            <div style={{ marginTop: '1rem', border: '1px solid var(--border)', borderRadius: 12, overflow: 'hidden' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', padding: '1rem', background: 'rgba(185,246,201,0.06)' }}>
+                <div>
+                  <span className="dashboard-round-stat-label">Market</span>
+                  <div style={{ fontWeight: 700, marginTop: 4 }}>{round.market.name}</div>
+                </div>
+                <div>
+                  <span className="dashboard-round-stat-label">Round</span>
+                  <div style={{ fontWeight: 700, marginTop: 4 }}>#{round.roundNumber}</div>
+                </div>
+                <div>
+                  <span className="dashboard-round-stat-label">Selection</span>
+                  <div style={{ fontWeight: 700, marginTop: 4 }}>{selectedOption?.label ?? '—'}</div>
+                </div>
+                <div>
+                  <span className="dashboard-round-stat-label">Odds</span>
+                  <div style={{ fontWeight: 700, marginTop: 4 }}>{(selectedOption?.odds ?? 0).toFixed(2)}x</div>
+                </div>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', padding: '1rem' }}>
+                <div>
+                  <span className="dashboard-round-stat-label">Stake</span>
+                  <div style={{ fontWeight: 800, marginTop: 4 }}>{(Number(stake) || 0).toFixed(4)} SOL</div>
+                </div>
+                <div>
+                  <span className="dashboard-round-stat-label">Potential Win</span>
+                  <div style={{ fontWeight: 800, marginTop: 4, color: '#62df98' }}>{(((Number(stake) || 0) * (selectedOption?.odds ?? 0)) || 0).toFixed(4)} SOL</div>
+                </div>
+              </div>
+            </div>
+
+            <div style={{ marginTop: '1rem' }}>
+              <span className="dashboard-round-stat-label">Transaction</span>
+              <code className="dashboard-code" style={{ display: 'block', marginTop: '0.4rem', wordBreak: 'break-all' }}>{confirmedSig}</code>
+              <div style={{ marginTop: '0.6rem', display: 'flex', gap: '0.6rem', flexWrap: 'wrap' }}>
+                <a href={`https://explorer.solana.com/tx/${confirmedSig}?cluster=devnet`} target="_blank" rel="noreferrer" className="link">View on Explorer</a>
+                <button className="link" onClick={() => { navigator.clipboard.writeText(confirmedSig).catch(() => {}); }}>Copy Hash</button>
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '1.25rem', gap: '0.5rem' }}>
+              <Button variant="primary" onClick={() => { window.location.href = '/app/bets' }}>View Bets</Button>
+              <Button variant="ghost" onClick={() => setShowConfirmModal(false)}>Close</Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

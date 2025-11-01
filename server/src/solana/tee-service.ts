@@ -24,15 +24,19 @@ const localStreakState = new Map<string, number>();
 
 export class TeeService {
   private teeRpcUrl: string;
+  private backupTeeRpcUrl?: string;
   private connection: Connection;
   private integrityOkAt?: number;
   private authToken?: string;
   private authTokenExpiresAt?: number;
+  private backupAuthToken?: string;
+  private backupAuthTokenExpiresAt?: number;
   private readonly adminKeypair = getAdminKeypair();
   private readonly adminPublicKey = new PublicKey(this.adminKeypair.publicKey);
 
   constructor() {
     this.teeRpcUrl = (config.TEE_RPC_URL || '').replace(/\/+$/, '');
+    this.backupTeeRpcUrl = (config.TEE_BACKUP_RPC_URL || '').replace(/\/+$/, '') || undefined;
     this.connection = new Connection(config.SOLANA_RPC_URL);
   }
 
@@ -88,10 +92,38 @@ export class TeeService {
     return token;
   }
 
+  private async ensureBackupAuthToken(): Promise<string> {
+    if (!this.backupTeeRpcUrl) throw new Error('No backup TEE configured');
+    const ttlMs = config.TEE_AUTH_CACHE_TTL * 1000;
+    const now = Date.now();
+    if (this.backupAuthToken && this.backupAuthTokenExpiresAt && now < this.backupAuthTokenExpiresAt) {
+      return this.backupAuthToken;
+    }
+    const { getAuthToken } = await import('@magicblock-labs/ephemeral-rollups-sdk/privacy');
+    const token = await getAuthToken(
+      this.backupTeeRpcUrl,
+      this.adminPublicKey,
+      async (message: Uint8Array) => nacl.sign.detached(message, this.adminKeypair.secretKey)
+    );
+    this.backupAuthToken = token;
+    this.backupAuthTokenExpiresAt = this.decodeExpiry(token, now + ttlMs);
+    return token;
+  }
+
   private async buildUrl(path: string, authorize = true): Promise<string> {
     const base = new URL(path, `${this.teeRpcUrl}/`);
     if (authorize) {
       const token = await this.ensureAuthToken();
+      base.searchParams.set('token', token);
+    }
+    return base.toString();
+  }
+
+  private async buildBackupUrl(path: string, authorize = true): Promise<string> {
+    if (!this.backupTeeRpcUrl) throw new Error('No backup TEE configured');
+    const base = new URL(path, `${this.backupTeeRpcUrl}/`);
+    if (authorize) {
+      const token = await this.ensureBackupAuthToken();
       base.searchParams.set('token', token);
     }
     return base.toString();
@@ -131,15 +163,13 @@ export class TeeService {
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          round_id: roundId,
-          market_type: teeMarketType,
-          params: {
-            chain_hash: params.chainHash ? Array.from(params.chainHash) : null,
-            community_seeds: params.communitySeeds || null,
-            vrf_randomness: params.vrfRandomness ? Array.from(params.vrfRandomness) : null,
-          },
-        }),
+        body: JSON.stringify((() => {
+          const p: any = {};
+          if (params.chainHash) p.chain_hash = Array.from(params.chainHash);
+          p.community_seeds = Array.isArray(params.communitySeeds) ? params.communitySeeds : [];
+          if (params.vrfRandomness) p.vrf_randomness = Array.from(params.vrfRandomness);
+          return { round_id: roundId, market_type: teeMarketType, params: p };
+        })()),
         signal: controller.signal,
       });
 
@@ -157,18 +187,57 @@ export class TeeService {
 
       return (await response.json()) as TeeAttestation;
     } catch (error: any) {
-      logger.error({ err: error }, 'TEE outcome generation failed, falling back to local engine');
-      const local: LocalTeeAttestation = await generateOutcomeLocal(
-        config.TEE_PRIVATE_KEY_HEX,
-        roundId,
-        teeMarketType,
-        {
-          chainHash: params.chainHash,
-          communitySeeds: params.communitySeeds,
-          vrfRandomness: params.vrfRandomness,
+      if (this.backupTeeRpcUrl) {
+        try {
+          if (config.TEE_INTEGRITY_REQUIRED) {
+            const { verifyTeeRpcIntegrity } = await import('@magicblock-labs/ephemeral-rollups-sdk/privacy');
+            const ok = await verifyTeeRpcIntegrity(this.backupTeeRpcUrl);
+            if (!ok) throw new Error('Backup TEE integrity verification failed');
+          }
+          const endpoint = await this.buildBackupUrl('/generate_outcome');
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 30000);
+          const response = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify((() => {
+              const p: any = {};
+              if (params.chainHash) p.chain_hash = Array.from(params.chainHash);
+              p.community_seeds = Array.isArray(params.communitySeeds) ? params.communitySeeds : [];
+              if (params.vrfRandomness) p.vrf_randomness = Array.from(params.vrfRandomness);
+              return { round_id: roundId, market_type: teeMarketType, params: p };
+            })()),
+            signal: controller.signal,
+          });
+          clearTimeout(timeout);
+          if (!response.ok) {
+            throw new Error(`Backup TEE RPC HTTP ${response.status}: ${response.statusText}`);
+          }
+          return (await response.json()) as TeeAttestation;
+        } catch (e) {
+          logger.error({ err: e }, 'Backup TEE outcome generation failed');
+          if (config.TEE_PRIVATE_KEY_HEX) {
+            const att = await generateOutcomeLocal(
+              config.TEE_PRIVATE_KEY_HEX,
+              roundId,
+              teeMarketType,
+              { chainHash: params.chainHash, communitySeeds: params.communitySeeds, vrfRandomness: params.vrfRandomness }
+            );
+            return att as unknown as TeeAttestation;
+          }
+          throw e;
         }
-      );
-      return { ...local, local_fallback: true };
+      }
+      if (config.TEE_PRIVATE_KEY_HEX) {
+        const att = await generateOutcomeLocal(
+          config.TEE_PRIVATE_KEY_HEX,
+          roundId,
+          teeMarketType,
+          { chainHash: params.chainHash, communitySeeds: params.communitySeeds, vrfRandomness: params.vrfRandomness }
+        );
+        return att as unknown as TeeAttestation;
+      }
+      throw error;
     }
   }
 

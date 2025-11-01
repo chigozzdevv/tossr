@@ -15,6 +15,7 @@ const envSchema = z.object({
   EPHEMERAL_WS_URL: z.string().url(),
   
   TEE_RPC_URL: z.string().url(),
+  TEE_BACKUP_RPC_URL: z.string().url().optional().default(''),
   TEE_INTEGRITY_REQUIRED: z.string().transform(v => v === 'true').default('false' as any),
   VRF_ORACLE_QUEUE: z.string().min(1, 'VRF_ORACLE_QUEUE is required'),
 
