@@ -7,19 +7,12 @@ import { TossrProgramService } from '@/solana/tossr-program-service';
 import { logger } from '@/utils/logger';
 import { config } from '@/config/env';
 import { PublicKey, Connection } from '@solana/web3.js';
-import { ConnectionMagicRouter } from '@magicblock-labs/ephemeral-rollups-sdk';
 import { getAssociatedTokenAddress } from '@solana/spl-token';
 import { getMarketConfig } from '@/utils/market-config';
 import bs58 from 'bs58';
 import { DISCRIMINATORS } from '@/utils/anchor-discriminators';
 const tossrProgram = new TossrProgramService();
 
-function getRouterUrl(url: string): string {
-  if (/router\.magicblock\.app/.test(url)) return url;
-  if (/devnet\.magicblock\.app/.test(url)) return 'https://devnet-router.magicblock.app';
-  if (/mainnet\.magicblock\.app/.test(url)) return 'https://mainnet-router.magicblock.app';
-  return url;
-}
 
 export class BetsService {
   async createBetTransaction(
@@ -72,8 +65,6 @@ export class BetsService {
       needsVaultAta = !info;
     } catch {}
 
-    const isDelegated = Boolean((round as any).delegateTxHash && !(round as any).undelegateTxHash);
-
     const { transaction, betPda } = await tossrProgram.placeBet(
       userPubkey,
       marketPubkey,
@@ -81,14 +72,13 @@ export class BetsService {
       selectionEncoded,
       stake,
       mint,
-      { useER: isDelegated }
+      { useER: false }
     );
 
     const serializedTransaction = transaction.serialize({ requireAllSignatures: false, verifySignatures: false });
 
     logger.info({ userId, roundId, stake, betPda: betPda.toString() }, 'Bet transaction created');
 
-    const bhSource = (transaction as any).__mb_blockhash_source as 'router' | 'er' | undefined;
     return {
       transaction: serializedTransaction.toString('base64'),
       betPda: betPda.toString(),
@@ -96,9 +86,7 @@ export class BetsService {
       vaultPda: vaultPda ? vaultPda.toString() : undefined,
       needsVaultAta,
       mint: mint.toString(),
-      submitRpcUrl: isDelegated
-        ? (bhSource === 'router' ? getRouterUrl(config.EPHEMERAL_RPC_URL) : config.EPHEMERAL_RPC_URL)
-        : config.SOLANA_RPC_URL,
+      submitRpcUrl: config.SOLANA_RPC_URL,
     } as any;
   }
 
@@ -131,58 +119,25 @@ export class BetsService {
       throw new ConflictError('Round is no longer accepting bet confirmations');
     }
 
-    const isDelegated = Boolean((round as any).delegateTxHash && !(round as any).undelegateTxHash);
-    const erConn = new Connection(config.EPHEMERAL_RPC_URL, { commitment: 'confirmed' });
     const baseConn = new Connection(config.SOLANA_RPC_URL, { commitment: 'confirmed' });
     const betPdaPk = new PublicKey(betPda);
-    let detectedBetAccount: any = null;
-
-    if (isDelegated) {
-      try {
-        logger.info({ txSignature, roundId }, 'Processing ER bet (fast path)...');
-
-        await new Promise(r => setTimeout(r, 300));
-
-        const routerEndpoint = getRouterUrl(config.EPHEMERAL_RPC_URL);
-        const routerConn = routerEndpoint.includes('magicblock.app')
-          ? new ConnectionMagicRouter(routerEndpoint, { commitment: 'confirmed', httpHeaders: { 'Content-Type': 'application/json' } } as any)
-          : new Connection(routerEndpoint, { commitment: 'confirmed' });
-
-        let betAccountInfo = await (routerConn as any).getAccountInfo(betPdaPk, 'confirmed').catch(() => null);
-        if (!betAccountInfo) {
-          betAccountInfo = await erConn.getAccountInfo(betPdaPk, 'confirmed');
-        }
-
-        if (!betAccountInfo) {
-          for (let i = 0; i < 8; i++) {
-            await new Promise(r => setTimeout(r, 250));
-            betAccountInfo = await erConn.getAccountInfo(betPdaPk, 'confirmed');
-            if (betAccountInfo) break;
-          }
-        }
-
-        if (betAccountInfo) {
-          detectedBetAccount = betAccountInfo;
-          logger.info({ txSignature, roundId, duration: '< 3s' }, 'ER bet confirmed (fast path)');
-          return await this.processBetConfirmation(
-            userId,
-            roundId,
-            round,
-            betAccountInfo,
-            txSignature,
-            betPda,
-            stake,
-            selection
-          );
-        }
-
-        logger.warn({ txSignature, roundId }, 'Bet account not found on ER after 2.3s, falling back to polling');
-      } catch (error: any) {
-        logger.error({ txSignature, roundId, error: error?.message }, 'ER fast path failed, falling back to polling');
-      }
+    let betAccountInfo = await baseConn.getAccountInfo(betPdaPk, 'confirmed');
+    for (let i = 0; !betAccountInfo && i < 8; i++) {
+      await new Promise(r => setTimeout(r, 250));
+      betAccountInfo = await baseConn.getAccountInfo(betPdaPk, 'confirmed');
     }
-
-    const betAccountInfo = detectedBetAccount;
+    if (betAccountInfo) {
+      return await this.processBetConfirmation(
+        userId,
+        roundId,
+        round,
+        betAccountInfo,
+        txSignature,
+        betPda,
+        stake,
+        selection
+      );
+    }
     const txResult = null as any;
     const toNumber = (value: any) => {
       if (typeof value === 'number') return value;

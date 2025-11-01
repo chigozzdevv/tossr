@@ -5,10 +5,9 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsc && tsc-alias -p tsconfig.json --addExtensions",
-    "start": "node dist/server.js",
+    "build": "tsc && tsc-alias -p tsconfig.json",
+    "start": "node --experimental-specifier-resolution=node dist/server.js",
     "markets:create": "tsx src/scripts/create-market.ts",
-    "markets:import-legacy": "tsx src/scripts/import-legacy-markets.ts",
     "markets:mint:sol": "npm run markets:create -- --mint=So11111111111111111111111111111111111111112 --edge=200",
     "seed:market": "tsx src/scripts/seed-market.ts",
     "test": "vitest",
