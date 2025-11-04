@@ -4,6 +4,8 @@ import { config } from '@/config/env';
 import { logger } from '@/utils/logger';
 import { roundLifecycleQueue } from '../queues';
 
+const ACTIVE_JOB_STATES = new Set(['active', 'waiting', 'delayed']);
+
 export async function autoLockRounds() {
   try {
     const now = new Date();
@@ -18,8 +20,15 @@ export async function autoLockRounds() {
 
       if (existingJob) {
         const state = await existingJob.getState();
-        if (state === 'active' || state === 'waiting' || state === 'delayed') {
-          logger.debug({ roundId: round.id, jobState: state }, 'Lock job already pending, skipping');
+        if (ACTIVE_JOB_STATES.has(state)) {
+          logger.debug({ roundId, jobState: state }, 'Lock job already pending, skipping');
+          continue;
+        }
+        try {
+          await existingJob.remove();
+          logger.debug({ roundId, jobState: state }, 'Removed stale lock job before rescheduling');
+        } catch (error) {
+          logger.error({ roundId, jobState: state, error }, 'Failed to remove stale lock job');
           continue;
         }
       }

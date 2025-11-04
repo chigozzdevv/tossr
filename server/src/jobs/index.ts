@@ -1,11 +1,12 @@
 import type { Worker } from 'bullmq';
-import { autoOpenRounds, releaseQueuedRounds, cleanupOldRounds } from './schedulers';
+import { autoOpenRounds, releaseQueuedRounds, cleanupOldRounds, recoverStalledRounds } from './schedulers';
 import { config } from '@/config/env';
 import { logger } from '@/utils/logger';
 
 let autoOpenInterval: NodeJS.Timeout | null = null;
 let releaseInterval: NodeJS.Timeout | null = null;
 let cleanupInterval: NodeJS.Timeout | null = null;
+let recoveryInterval: NodeJS.Timeout | null = null;
 
 let roundLifecycleWorker: Worker | null = null;
 let betSettlementWorker: Worker | null = null;
@@ -23,13 +24,17 @@ export async function initializeJobs() {
 
   await autoOpenRounds();
   await releaseQueuedRounds();
+  await recoverStalledRounds();
 
   autoOpenInterval = setInterval(autoOpenRounds, config.ROUND_RELEASE_INTERVAL_SECONDS * 1000);
   releaseInterval = setInterval(releaseQueuedRounds, config.ROUND_RELEASE_POLL_SECONDS * 1000);
   cleanupInterval = setInterval(cleanupOldRounds, 60 * 60 * 1000);
+  const recoveryIntervalMs = Math.max(60000, config.ROUND_RELEASE_POLL_SECONDS * 1000);
+  recoveryInterval = setInterval(recoverStalledRounds, recoveryIntervalMs);
   logger.info({ intervalSeconds: config.ROUND_RELEASE_INTERVAL_SECONDS }, 'Auto-open scheduler started');
   logger.info({ intervalSeconds: config.ROUND_RELEASE_POLL_SECONDS }, 'Release queued scheduler started');
   logger.info('Cleanup old rounds scheduler started (interval: 1h)');
+  logger.info({ intervalMs: recoveryIntervalMs }, 'Stalled round recovery scheduler started');
 
   logger.info('All background jobs initialized');
 }
@@ -48,6 +53,10 @@ export async function shutdownJobs() {
   if (cleanupInterval) {
     clearInterval(cleanupInterval);
     cleanupInterval = null;
+  }
+  if (recoveryInterval) {
+    clearInterval(recoveryInterval);
+    recoveryInterval = null;
   }
 
   await Promise.all([
