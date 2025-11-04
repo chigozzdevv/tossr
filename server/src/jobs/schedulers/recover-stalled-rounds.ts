@@ -1,4 +1,4 @@
-import { Round } from '@/config/database';
+import { Round, Bet } from '@/config/database';
 import { RoundStatus } from '@/shared/types';
 import { config } from '@/config/env';
 import { logger } from '@/utils/logger';
@@ -60,23 +60,45 @@ export async function recoverStalledRounds() {
 
     if (staleQueued.length > 0) {
       const ids = staleQueued.map((round) => (round as any)._id);
-      await Round.updateMany(
-        { _id: { $in: ids } },
-        {
-          $set: {
-            status: RoundStatus.FAILED,
-            settledAt: new Date(),
-          },
-        }
-      );
+      const betCounts = await Bet.aggregate<{ _id: string; count: number }>([
+        { $match: { roundId: { $in: ids } } },
+        { $group: { _id: '$roundId', count: { $sum: 1 } } },
+      ]);
+      const roundIdHasBets = new Map<string, number>();
+      for (const entry of betCounts) {
+        roundIdHasBets.set(String(entry._id), entry.count);
+      }
 
-      logger.warn(
-        {
-          count: staleQueued.length,
-          roundIds: ids.map(String),
-        },
-        'Marked stale queued rounds as FAILED to unblock scheduling'
-      );
+      const toFail = ids.filter((id) => !roundIdHasBets.has(String(id)));
+      if (toFail.length > 0) {
+        await Round.updateMany(
+          { _id: { $in: toFail } },
+          {
+            $set: {
+              status: RoundStatus.FAILED,
+              settledAt: new Date(),
+            },
+          }
+        );
+        logger.warn(
+          {
+            count: toFail.length,
+            roundIds: toFail.map(String),
+          },
+          'Marked stale queued rounds with no bets as FAILED to unblock scheduling'
+        );
+      }
+
+      const withBets = ids.filter((id) => roundIdHasBets.has(String(id)));
+      if (withBets.length > 0) {
+        logger.warn(
+          {
+            count: withBets.length,
+            roundIds: withBets.map(String),
+          },
+          'Stale queued rounds with bets detected; leaving untouched for manual review'
+        );
+      }
     }
   } catch (error) {
     logger.error({ error }, 'Failed to recover stalled rounds');
