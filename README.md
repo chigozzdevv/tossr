@@ -1,5 +1,7 @@
 # TOSSR.gg — Provably Random Gaming with MagicBlock ER + VRF + TEE
 
+View demo [here](https://youtu.be/vcAsKuCF6Qg)
+
 TOSSR.gg is a provably-fair gaming platform on Solana that combines:
 - MagicBlock Ephemeral Rollups (ER) for low‑latency, gasless UX and fast state commits
 - MagicBlock VRF for verifiable 32‑byte randomness
